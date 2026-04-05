@@ -31,6 +31,61 @@ pub struct SessionListItemVm {
     pub last_msg_timestamp: i64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SearchUserVm {
+    pub user_id: u64,
+    pub username: String,
+    pub nickname: String,
+    pub avatar_url: Option<String>,
+    pub user_type: i16,
+    pub search_session_id: u64,
+    pub is_friend: bool,
+    pub can_send_message: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FriendListItemVm {
+    pub user_id: u64,
+    pub title: String,
+    pub subtitle: String,
+    pub is_added: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct GroupListItemVm {
+    pub group_id: u64,
+    pub title: String,
+    pub subtitle: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct FriendRequestItemVm {
+    pub from_user_id: u64,
+    pub title: String,
+    pub subtitle: String,
+    pub is_added: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddFriendSelectionVm {
+    Friend(u64),
+    Group(u64),
+    Request(u64),
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AddFriendDetailFieldVm {
+    pub label: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct AddFriendDetailVm {
+    pub title: String,
+    pub subtitle: String,
+    pub fields: Vec<AddFriendDetailFieldVm>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimelineItemKey {
     Local(ClientTxnId),

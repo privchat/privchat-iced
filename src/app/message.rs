@@ -1,8 +1,10 @@
 use iced::widget::text_editor;
+use iced::window;
 
 use crate::presentation::vm::{
-    ClientTxnId, HistoryPageVm, LoginSessionVm, OpenToken, SessionListItemVm, TimelineItemKey,
-    TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
+    AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
+    GroupListItemVm, HistoryPageVm, LoginSessionVm, OpenToken, SearchUserVm, SessionListItemVm,
+    TimelineItemKey, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
 };
 
 #[derive(Debug, Clone)]
@@ -15,6 +17,25 @@ pub enum AppMessage {
         items: Vec<SessionListItemVm>,
     },
     SessionListLoadFailed {
+        error: UiError,
+    },
+    RefreshAddFriendData,
+    AddFriendFriendsLoaded {
+        items: Vec<FriendListItemVm>,
+    },
+    AddFriendFriendsLoadFailed {
+        error: UiError,
+    },
+    AddFriendGroupsLoaded {
+        items: Vec<GroupListItemVm>,
+    },
+    AddFriendGroupsLoadFailed {
+        error: UiError,
+    },
+    AddFriendRequestsLoaded {
+        items: Vec<FriendRequestItemVm>,
+    },
+    AddFriendRequestsLoadFailed {
         error: UiError,
     },
     TotalUnreadCountLoaded {
@@ -34,19 +55,38 @@ pub enum AppMessage {
     LoginDeviceIdChanged {
         text: String,
     },
-    FocusNextWidget,
-    FocusPreviousWidget,
-    GlobalLeftMousePressed,
+    FocusNextWidget {
+        window_id: window::Id,
+    },
+    FocusPreviousWidget {
+        window_id: window::Id,
+    },
+    GlobalLeftMousePressed {
+        window_id: window::Id,
+    },
     SessionSplitterDragStarted,
     SessionSplitterDragEnded,
     GlobalCursorMoved {
+        window_id: window::Id,
         x: f32,
     },
     WindowResized {
+        window_id: window::Id,
         width: f32,
     },
     OpenSessionListPage,
     OpenAddFriendPage,
+    OpenAddFriendSearchWindow,
+    MainWindowOpened {
+        window_id: window::Id,
+    },
+    AddFriendSearchWindowOpened {
+        window_id: window::Id,
+    },
+    CloseAddFriendSearchWindow,
+    WindowCloseRequested {
+        window_id: window::Id,
+    },
     ToggleSettingsMenu,
     DismissSettingsMenu,
     SettingsMenuOpenSettings,
@@ -96,10 +136,37 @@ pub enum AppMessage {
     AddFriendSearchChanged {
         text: String,
     },
+    AddFriendSearchPressed,
+    AddFriendSearchLoaded {
+        users: Vec<SearchUserVm>,
+    },
+    AddFriendSearchFailed {
+        error: UiError,
+    },
+    AddFriendResultSelected {
+        user_id: u64,
+    },
+    AddFriendPanelSelected {
+        item: AddFriendSelectionVm,
+    },
+    AddFriendDetailLoaded {
+        item: AddFriendSelectionVm,
+        detail: AddFriendDetailVm,
+    },
+    AddFriendDetailLoadFailed {
+        item: AddFriendSelectionVm,
+        error: UiError,
+    },
     ToggleNewFriendsSection,
     ToggleGroupSection,
     ToggleFriendSection,
     AddFriendRequestPressed,
+    AddFriendRequestSucceeded {
+        user_id: u64,
+    },
+    AddFriendRequestFailed {
+        error: UiError,
+    },
     ComposerEdited {
         action: text_editor::Action,
     },

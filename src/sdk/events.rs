@@ -1,11 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use privchat_sdk::SdkEvent;
+use tracing::{info, warn};
 
 use crate::app::message::AppMessage;
-use crate::presentation::vm::{
-    ClientTxnId, MessageSendStateVm, OpenToken, TimelinePatchVm, TimelineRevision, UiError,
-};
+use crate::presentation::vm::{ClientTxnId, OpenToken, TimelineRevision};
 
 #[derive(Debug, Clone, Default, Hash)]
 pub struct EventMapContext {
@@ -31,17 +30,48 @@ pub fn allocate_patch_revision() -> TimelineRevision {
     PATCH_REVISION_SEQ.fetch_add(1, Ordering::Relaxed)
 }
 
-fn map_send_status(status: i32) -> MessageSendStateVm {
-    match status {
-        0 => MessageSendStateVm::Queued,
-        1 => MessageSendStateVm::Sending,
-        2 => MessageSendStateVm::Sent,
-        3 => MessageSendStateVm::FailedRetryable {
-            reason: UiError::Unknown("send failed".to_string()),
-        },
-        other => MessageSendStateVm::FailedPermanent {
-            reason: UiError::Unknown(format!("unknown send status: {other}")),
-        },
+fn is_channel_entity(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "channel" | "channel_extra" | "channel_unread" | "channel_read_cursor"
+    )
+}
+
+fn is_message_entity(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "message"
+            | "message_send"
+            | "message_read"
+            | "message_reaction"
+            | "message_revoke"
+            | "message_status"
+    )
+}
+
+fn is_contact_entity(entity_type: &str) -> bool {
+    matches!(
+        entity_type,
+        "friend"
+            | "friends"
+            | "friend_request"
+            | "friend_requests"
+            | "friend_pending"
+            | "group"
+            | "groups"
+            | "group_member"
+            | "group_members"
+            | "user"
+            | "users"
+    )
+}
+
+fn ingress_from_context(context: &EventMapContext, message_id: u64) -> AppMessage {
+    AppMessage::TimelineUpdatedIngress {
+        channel_id: context.channel_id,
+        channel_type: context.channel_type,
+        open_token: context.open_token,
+        message_id,
     }
 }
 
@@ -55,22 +85,154 @@ pub fn map_sdk_event_without_context(event: SdkEvent) -> AppMessage {
 
 /// Map SDK events into app messages with optional active-chat context.
 /// - Active chat timeline updates are routed to timeline ingress.
-/// - Other timeline updates trigger unread-count refresh.
+/// - Non-active updates trigger session list refresh.
 pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppMessage {
     match event {
-        SdkEvent::BootstrapCompleted { .. }
-        | SdkEvent::SyncAllChannelsApplied { .. }
-        | SdkEvent::SyncChannelApplied { .. } => AppMessage::RefreshSessionList,
-        SdkEvent::SyncEntitiesApplied { entity_type, .. } => {
-            if entity_type == "channel" || entity_type == "channel_read_cursor" {
+        SdkEvent::ConnectionStateChanged { from, to } => {
+            info!("sdk_event: connection_state_changed {:?} -> {:?}", from, to);
+            AppMessage::Noop
+        }
+        SdkEvent::NetworkHintChanged { from, to } => {
+            info!("sdk_event: network_hint_changed {:?} -> {:?}", from, to);
+            AppMessage::Noop
+        }
+        SdkEvent::ResumeSyncStarted => {
+            info!("sdk_event: resume_sync_started");
+            AppMessage::Noop
+        }
+        SdkEvent::ResumeSyncCompleted {
+            entity_types_synced,
+            channels_scanned,
+            channels_applied,
+            channel_failures,
+        } => {
+            info!(
+                "sdk_event: resume_sync_completed entity_types_synced={} channels_scanned={} channels_applied={} channel_failures={}",
+                entity_types_synced, channels_scanned, channels_applied, channel_failures
+            );
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::ResumeSyncFailed {
+            classification,
+            scope,
+            error_code,
+            message,
+        } => {
+            warn!(
+                "sdk_event: resume_sync_failed classification={:?} scope={:?} code={} message={}",
+                classification, scope, error_code, message
+            );
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::ResumeSyncEscalated {
+            classification,
+            scope,
+            reason,
+            entity_type,
+            channel_id,
+            channel_type,
+        } => {
+            warn!(
+                "sdk_event: resume_sync_escalated classification={:?} scope={:?} reason={} entity_type={:?} channel_id={:?} channel_type={:?}",
+                classification, scope, reason, entity_type, channel_id, channel_type
+            );
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::ResumeSyncChannelStarted {
+            channel_id,
+            channel_type,
+        } => {
+            info!(
+                "sdk_event: resume_sync_channel_started channel_id={} channel_type={}",
+                channel_id, channel_type
+            );
+            AppMessage::Noop
+        }
+        SdkEvent::ResumeSyncChannelCompleted {
+            channel_id,
+            channel_type,
+            applied,
+        } => {
+            info!(
+                "sdk_event: resume_sync_channel_completed channel_id={} channel_type={} applied={}",
+                channel_id, channel_type, applied
+            );
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::ResumeSyncChannelFailed {
+            channel_id,
+            channel_type,
+            classification,
+            scope,
+            error_code,
+            message,
+        } => {
+            warn!(
+                "sdk_event: resume_sync_channel_failed channel_id={} channel_type={} classification={:?} scope={:?} code={} message={}",
+                channel_id, channel_type, classification, scope, error_code, message
+            );
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::BootstrapCompleted { user_id } => {
+            info!("sdk_event: bootstrap_completed user_id={user_id}");
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::SyncAllChannelsApplied { applied } => {
+            info!("sdk_event: sync_all_channels_applied applied={applied}");
+            AppMessage::RefreshSessionList
+        }
+        SdkEvent::SyncChannelApplied {
+            channel_id,
+            channel_type,
+            applied,
+        } => {
+            info!(
+                "sdk_event: sync_channel_applied channel_id={} channel_type={} applied={}",
+                channel_id, channel_type, applied
+            );
+            if applied > 0 {
                 AppMessage::RefreshSessionList
             } else {
                 AppMessage::Noop
             }
         }
-        SdkEvent::SyncEntityChanged { entity_type, .. } => {
-            if entity_type == "channel" || entity_type == "channel_read_cursor" {
+        SdkEvent::SyncEntitiesApplied {
+            entity_type,
+            scope,
+            queued,
+            applied,
+            dropped_duplicates,
+        } => {
+            let entity = entity_type.to_ascii_lowercase();
+            info!(
+                "sdk_event: sync_entities_applied entity_type={} scope={:?} queued={} applied={} dropped_duplicates={}",
+                entity, scope, queued, applied, dropped_duplicates
+            );
+            if applied == 0 {
+                return AppMessage::Noop;
+            }
+            if is_channel_entity(&entity) || is_message_entity(&entity) {
                 AppMessage::RefreshSessionList
+            } else if is_contact_entity(&entity) {
+                AppMessage::RefreshAddFriendData
+            } else {
+                AppMessage::Noop
+            }
+        }
+        SdkEvent::SyncEntityChanged {
+            entity_type,
+            entity_id,
+            deleted,
+        } => {
+            let entity = entity_type.to_ascii_lowercase();
+            info!(
+                "sdk_event: sync_entity_changed entity_type={} entity_id={} deleted={}",
+                entity, entity_id, deleted
+            );
+            if is_channel_entity(&entity) || is_message_entity(&entity) {
+                AppMessage::RefreshSessionList
+            } else if is_contact_entity(&entity) {
+                AppMessage::RefreshAddFriendData
             } else {
                 AppMessage::Noop
             }
@@ -79,41 +241,52 @@ pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppM
             channel_id,
             channel_type,
             message_id,
-            reason: _,
+            reason,
         } => {
             if let Some(context) = context {
                 if channel_id == context.channel_id && channel_type == context.channel_type {
-                    return AppMessage::TimelineUpdatedIngress {
-                        channel_id,
-                        channel_type,
-                        open_token: context.open_token,
-                        message_id,
-                    };
+                    info!(
+                        "sdk_event: timeline_updated active channel_id={} channel_type={} message_id={} reason={}",
+                        channel_id, channel_type, message_id, reason
+                    );
+                    return ingress_from_context(context, message_id);
                 }
             }
-            AppMessage::RefreshTotalUnreadCount
+            info!(
+                "sdk_event: timeline_updated background channel_id={} channel_type={} message_id={} reason={}",
+                channel_id, channel_type, message_id, reason
+            );
+            AppMessage::RefreshSessionList
         }
         SdkEvent::MessageSendStatusChanged {
             message_id,
             status,
-            server_message_id: _,
+            server_message_id,
         } => {
-            let Some(context) = context else {
-                return AppMessage::Noop;
-            };
-            context
-                .client_txn_id_for_message(message_id)
-                .map(|client_txn_id| AppMessage::TimelinePatched {
-                    channel_id: context.channel_id,
-                    channel_type: context.channel_type,
-                    open_token: context.open_token,
-                    revision: allocate_patch_revision(),
-                    patch: TimelinePatchVm::UpdateSendState {
-                        client_txn_id,
-                        send_state: map_send_status(status),
-                    },
-                })
-                .unwrap_or(AppMessage::Noop)
+            info!(
+                "sdk_event: message_send_status_changed message_id={} status={} server_message_id={:?}",
+                message_id, status, server_message_id
+            );
+            match context {
+                Some(context) => ingress_from_context(context, message_id),
+                None => AppMessage::RefreshSessionList,
+            }
+        }
+        SdkEvent::OutboundQueueUpdated {
+            kind,
+            action,
+            message_id,
+            queue_index,
+        } => {
+            info!(
+                "sdk_event: outbound_queue_updated kind={} action={} message_id={:?} queue_index={:?}",
+                kind, action, message_id, queue_index
+            );
+            match (context, message_id) {
+                (Some(context), Some(message_id)) => ingress_from_context(context, message_id),
+                (None, Some(_)) => AppMessage::RefreshSessionList,
+                (_, None) => AppMessage::Noop,
+            }
         }
         _ => AppMessage::Noop,
     }
@@ -125,40 +298,14 @@ pub fn map_sdk_event_to_app_message(
     event: SdkEvent,
     context: &EventMapContext,
 ) -> Option<AppMessage> {
-    match event {
-        SdkEvent::TimelineUpdated {
-            channel_id,
-            channel_type,
-            message_id,
-            reason: _,
-        } => {
-            if channel_id != context.channel_id || channel_type != context.channel_type {
-                return None;
-            }
-            Some(AppMessage::TimelineUpdatedIngress {
-                channel_id,
-                channel_type,
-                open_token: context.open_token,
-                message_id,
-            })
-        }
-        SdkEvent::MessageSendStatusChanged {
-            message_id,
-            status,
-            server_message_id: _,
-        } => context
-            .client_txn_id_for_message(message_id)
-            .map(|client_txn_id| AppMessage::TimelinePatched {
-                channel_id: context.channel_id,
-                channel_type: context.channel_type,
-                open_token: context.open_token,
-                revision: allocate_patch_revision(),
-                patch: TimelinePatchVm::UpdateSendState {
-                    client_txn_id,
-                    send_state: map_send_status(status),
-                },
-            }),
-        _ => None,
+    let mapped = map_sdk_event(event, Some(context));
+    if matches!(
+        mapped,
+        AppMessage::Noop | AppMessage::RefreshSessionList | AppMessage::RefreshTotalUnreadCount
+    ) {
+        None
+    } else {
+        Some(mapped)
     }
 }
 
@@ -216,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn send_status_maps_through_runtime_index_only() {
+    fn send_status_always_maps_to_ingress_for_active_context() {
         let context = base_context();
         let mapped = map_sdk_event_to_app_message(
             SdkEvent::MessageSendStatusChanged {
@@ -228,19 +375,15 @@ mod tests {
         );
         assert!(matches!(
             mapped,
-            Some(AppMessage::TimelinePatched {
+            Some(AppMessage::TimelineUpdatedIngress {
                 channel_id: 100,
                 channel_type: 2,
                 open_token: 7,
-                patch: TimelinePatchVm::UpdateSendState {
-                    client_txn_id: 2001,
-                    send_state: MessageSendStateVm::Sent
-                },
-                ..
+                message_id: 11,
             })
         ));
 
-        let unmapped = map_sdk_event_to_app_message(
+        let fallback = map_sdk_event_to_app_message(
             SdkEvent::MessageSendStatusChanged {
                 message_id: 999,
                 status: 2,
@@ -248,6 +391,14 @@ mod tests {
             },
             &context,
         );
-        assert!(unmapped.is_none());
+        assert!(matches!(
+            fallback,
+            Some(AppMessage::TimelineUpdatedIngress {
+                channel_id: 100,
+                channel_type: 2,
+                open_token: 7,
+                message_id: 999,
+            })
+        ));
     }
 }

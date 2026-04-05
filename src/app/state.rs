@@ -1,12 +1,14 @@
 use std::collections::HashMap;
 
 use iced::widget::text_editor;
+use iced::window;
 
 use crate::app::auth_prefs;
 use crate::app::route::Route;
 use crate::presentation::vm::{
-    ClientTxnId, MessageVm, OpenToken, SessionListItemVm, TimelineItemKey, TimelineRevision,
-    UnreadMarkerVm,
+    AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
+    GroupListItemVm, MessageVm, OpenToken, SearchUserVm, SessionListItemVm, TimelineItemKey,
+    TimelineRevision, UnreadMarkerVm,
 };
 
 fn default_device_id() -> String {
@@ -72,6 +74,18 @@ pub struct AddFriendState {
     pub add_input: String,
     pub search_input: String,
     pub feedback: Option<String>,
+    pub search_error: Option<String>,
+    pub contacts_error: Option<String>,
+    pub search_loading: bool,
+    pub search_results: Vec<SearchUserVm>,
+    pub selected_search_user_id: Option<u64>,
+    pub friends: Vec<FriendListItemVm>,
+    pub groups: Vec<GroupListItemVm>,
+    pub requests: Vec<FriendRequestItemVm>,
+    pub selected_panel_item: Option<AddFriendSelectionVm>,
+    pub detail: Option<AddFriendDetailVm>,
+    pub detail_loading: bool,
+    pub detail_error: Option<String>,
     pub new_friends_expanded: bool,
     pub groups_expanded: bool,
     pub friends_expanded: bool,
@@ -83,6 +97,18 @@ impl Default for AddFriendState {
             add_input: String::new(),
             search_input: String::new(),
             feedback: None,
+            search_error: None,
+            contacts_error: None,
+            search_loading: false,
+            search_results: Vec::new(),
+            selected_search_user_id: None,
+            friends: Vec::new(),
+            groups: Vec::new(),
+            requests: Vec::new(),
+            selected_panel_item: None,
+            detail: None,
+            detail_loading: false,
+            detail_error: None,
             new_friends_expanded: false,
             groups_expanded: false,
             friends_expanded: true,
@@ -191,6 +217,8 @@ pub struct ChatScreenState {
 #[derive(Debug)]
 pub struct AppState {
     pub route: Route,
+    pub main_window_id: Option<window::Id>,
+    pub add_friend_search_window_id: Option<window::Id>,
     pub active_chat: Option<ChatScreenState>,
     pub auth: AuthState,
     pub layout: WorkspaceLayoutState,
@@ -225,6 +253,8 @@ impl AppState {
     pub fn new() -> Self {
         Self {
             route: Route::default(),
+            main_window_id: None,
+            add_friend_search_window_id: None,
             active_chat: None,
             auth: AuthState::default(),
             layout: WorkspaceLayoutState::default(),

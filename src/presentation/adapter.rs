@@ -74,6 +74,8 @@ pub fn map_send_status(status: i32, is_own: bool) -> Option<MessageSendStateVm> 
         3 => MessageSendStateVm::FailedRetryable {
             reason: UiError::Unknown("send failed".to_string()),
         },
+        // Keep UI stable when backend introduces finer-grained delivered/read statuses.
+        other if other >= 4 => MessageSendStateVm::Sent,
         other => MessageSendStateVm::FailedPermanent {
             reason: UiError::Unknown(format!("unknown send status: {other}")),
         },

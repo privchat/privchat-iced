@@ -32,22 +32,23 @@ fn map_context_from_state(state: &AppState) -> Option<EventMapContext> {
 fn map_global_event(
     event: iced::Event,
     status: event::Status,
-    _window: iced::window::Id,
+    window_id: iced::window::Id,
 ) -> Option<AppMessage> {
     match event {
         iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
-            Some(AppMessage::GlobalCursorMoved { x: position.x })
+            Some(AppMessage::GlobalCursorMoved {
+                window_id,
+                x: position.x,
+            })
         }
         iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => match status {
-            event::Status::Ignored => Some(AppMessage::GlobalLeftMousePressed),
+            event::Status::Ignored => Some(AppMessage::GlobalLeftMousePressed { window_id }),
             event::Status::Captured => None,
         },
-        iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
-            Some(AppMessage::SessionSplitterDragEnded)
-        }
-        iced::Event::Window(window::Event::Resized(size)) => {
-            Some(AppMessage::WindowResized { width: size.width })
-        }
+        iced::Event::Window(window::Event::Resized(size)) => Some(AppMessage::WindowResized {
+            window_id,
+            width: size.width,
+        }),
         iced::Event::Keyboard(keyboard::Event::KeyPressed {
             key: Key::Named(key::Named::Tab),
             modifiers,
@@ -56,9 +57,9 @@ fn map_global_event(
             if modifiers.command() || modifiers.control() || modifiers.alt() {
                 None
             } else if modifiers.shift() {
-                Some(AppMessage::FocusPreviousWidget)
+                Some(AppMessage::FocusPreviousWidget { window_id })
             } else {
-                Some(AppMessage::FocusNextWidget)
+                Some(AppMessage::FocusNextWidget { window_id })
             }
         }
         _ => None,
@@ -67,7 +68,10 @@ fn map_global_event(
 
 /// Build subscriptions for SDK event streams.
 pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscription<AppMessage> {
-    let mut subscriptions = vec![event::listen_with(map_global_event)];
+    let mut subscriptions = vec![
+        event::listen_with(map_global_event),
+        window::close_requests().map(|window_id| AppMessage::WindowCloseRequested { window_id }),
+    ];
     if let Some(context) = map_context_from_state(state) {
         subscriptions.push(
             bridge

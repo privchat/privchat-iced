@@ -43,7 +43,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
                 empty_detail("请选择一个会话")
             }
         }
-        Route::AddFriend => add_friend::detail_view(),
+        Route::AddFriend => add_friend::detail_view(&state.add_friend),
         Route::Settings => settings::view(&state.settings),
         Route::SessionList => empty_detail("请选择一个会话"),
         Route::Login => empty_detail(""),
@@ -51,7 +51,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     };
 
     let middle_panel: Element<'_, AppMessage> = match state.route {
-        Route::AddFriend => add_friend::panel_view(&state.add_friend, &state.session_list),
+        Route::AddFriend => add_friend::panel_view(&state.add_friend),
         _ => session_list::view(
             &state.session_list,
             active_chat,

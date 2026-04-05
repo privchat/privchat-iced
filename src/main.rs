@@ -22,10 +22,13 @@ struct PrivchatApp {
 fn boot() -> (PrivchatApp, Task<AppMessage>) {
     let bridge: Arc<dyn SdkBridge> = Arc::new(PrivchatSdkBridge::new());
     let restore_bridge = Arc::clone(&bridge);
-    let app = PrivchatApp {
+    let mut app = PrivchatApp {
         state: AppState::new(),
         bridge,
     };
+    let (main_window_id, open_main_window_task) = window::open(main_window_settings());
+    app.state.main_window_id = Some(main_window_id);
+
     let restore_task = Task::perform(
         async move {
             let start = Instant::now();
@@ -45,14 +48,20 @@ fn boot() -> (PrivchatApp, Task<AppMessage>) {
         },
         |session| AppMessage::StartupRestoreCompleted { session },
     );
-    (app, restore_task)
+    let open_main_window_task =
+        open_main_window_task.map(|window_id| AppMessage::MainWindowOpened { window_id });
+    (app, Task::batch([open_main_window_task, restore_task]))
 }
 
 fn update(app: &mut PrivchatApp, message: AppMessage) -> Task<AppMessage> {
     app::update::update(&mut app.state, message, &app.bridge)
 }
 
-fn view(app: &PrivchatApp) -> Element<'_, AppMessage> {
+fn view(app: &PrivchatApp, window_id: window::Id) -> Element<'_, AppMessage> {
+    if app.state.add_friend_search_window_id == Some(window_id) {
+        return ui::screens::add_friend::search_window_view(&app.state.add_friend);
+    }
+
     match app.state.route {
         Route::Splash => ui::screens::splash::view(),
         Route::Login => ui::screens::login::view(&app.state.auth),
@@ -66,7 +75,11 @@ fn subscription(app: &PrivchatApp) -> Subscription<AppMessage> {
     app::subscription::subscription(&app.bridge, &app.state)
 }
 
-fn window_title(app: &PrivchatApp) -> String {
+fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
+    if app.state.add_friend_search_window_id == Some(window_id) {
+        return "Add Contacts".to_string();
+    }
+
     let active_peer_name = app.state.active_chat.as_ref().and_then(|active| {
         app.state
             .session_list
@@ -95,16 +108,19 @@ fn window_title(app: &PrivchatApp) -> String {
     }
 }
 
+fn main_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(1024.0, 768.0),
+        min_size: Some(Size::new(800.0, 600.0)),
+        ..window::Settings::default()
+    }
+}
+
 fn main() -> iced::Result {
     tracing_subscriber::fmt::init();
 
-    iced::application(boot, update, view)
+    iced::daemon(boot, update, view)
         .title(window_title)
-        .window(window::Settings {
-            size: Size::new(1024.0, 768.0),
-            min_size: Some(Size::new(800.0, 600.0)),
-            ..window::Settings::default()
-        })
         .default_font(Font::with_name("Microsoft YaHei"))
         .subscription(subscription)
         .run()

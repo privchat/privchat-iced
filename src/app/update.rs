@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use iced::Task;
+use iced::{window, Size, Task};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -13,8 +13,8 @@ use crate::app::state::{
     AppState, ChatScreenState, ComposerState, RuntimeMessageIndex, TimelineState,
 };
 use crate::presentation::vm::{
-    ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey, TimelinePatchVm,
-    UnreadMarkerVm,
+    AddFriendSelectionVm, ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey,
+    TimelinePatchVm, UnreadMarkerVm,
 };
 use crate::sdk::bridge::SdkBridge;
 use crate::sdk::events;
@@ -75,6 +75,52 @@ pub fn update(
 
         AppMessage::RefreshSessionList => schedule_session_list_refresh(bridge),
 
+        AppMessage::RefreshAddFriendData => {
+            if state.auth.user_id.is_none() {
+                return Task::none();
+            }
+            if !matches!(state.route, Route::AddFriend) {
+                return Task::none();
+            }
+            state.add_friend.contacts_error = None;
+            schedule_add_friend_refresh(bridge)
+        }
+
+        AppMessage::AddFriendFriendsLoaded { items } => {
+            state.add_friend.friends = items;
+            state.add_friend.contacts_error = None;
+            sync_add_friend_flags(state);
+            Task::none()
+        }
+
+        AppMessage::AddFriendFriendsLoadFailed { error } => {
+            state.add_friend.contacts_error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::AddFriendGroupsLoaded { items } => {
+            state.add_friend.groups = items;
+            state.add_friend.contacts_error = None;
+            Task::none()
+        }
+
+        AppMessage::AddFriendGroupsLoadFailed { error } => {
+            state.add_friend.contacts_error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::AddFriendRequestsLoaded { items } => {
+            state.add_friend.requests = items;
+            state.add_friend.contacts_error = None;
+            sync_add_friend_flags(state);
+            Task::none()
+        }
+
+        AppMessage::AddFriendRequestsLoadFailed { error } => {
+            state.add_friend.contacts_error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
         AppMessage::RefreshTotalUnreadCount => schedule_total_unread_refresh(bridge),
 
         AppMessage::LoginUsernameChanged { text } => {
@@ -92,7 +138,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::FocusNextWidget => {
+        AppMessage::FocusNextWidget { window_id } => {
+            if state.main_window_id != Some(window_id) {
+                return Task::none();
+            }
             if matches!(state.route, Route::Login) {
                 iced::widget::operation::focus_next()
             } else {
@@ -100,7 +149,10 @@ pub fn update(
             }
         }
 
-        AppMessage::FocusPreviousWidget => {
+        AppMessage::FocusPreviousWidget { window_id } => {
+            if state.main_window_id != Some(window_id) {
+                return Task::none();
+            }
             if matches!(state.route, Route::Login) {
                 iced::widget::operation::focus_previous()
             } else {
@@ -119,7 +171,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::GlobalLeftMousePressed => {
+        AppMessage::GlobalLeftMousePressed { window_id } => {
+            if state.main_window_id != Some(window_id) {
+                return Task::none();
+            }
             if let Some(cursor_x) = state.layout.last_cursor_x {
                 if is_cursor_near_session_splitter(state, cursor_x) {
                     state.layout.is_resizing_session_splitter = true;
@@ -128,7 +183,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::GlobalCursorMoved { x } => {
+        AppMessage::GlobalCursorMoved { window_id, x } => {
+            if state.main_window_id != Some(window_id) {
+                return Task::none();
+            }
             state.layout.last_cursor_x = Some(x);
 
             if !state.layout.is_resizing_session_splitter {
@@ -141,7 +199,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::WindowResized { width } => {
+        AppMessage::WindowResized { window_id, width } => {
+            if state.main_window_id != Some(window_id) {
+                return Task::none();
+            }
             state.layout.window_width = width;
             state.layout.session_list_width =
                 clamp_session_list_width(width, state.layout.session_list_width);
@@ -158,10 +219,52 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::MainWindowOpened { window_id } => {
+            state.main_window_id = Some(window_id);
+            Task::none()
+        }
+
+        AppMessage::AddFriendSearchWindowOpened { window_id } => {
+            state.add_friend_search_window_id = Some(window_id);
+            Task::none()
+        }
+
         AppMessage::OpenAddFriendPage => {
             state.overlay.settings_menu_open = false;
             state.route = Route::AddFriend;
+            if state.auth.user_id.is_none() {
+                return Task::none();
+            }
+            state.add_friend.feedback = None;
+            state.add_friend.contacts_error = None;
+            schedule_add_friend_refresh(bridge)
+        }
+
+        AppMessage::OpenAddFriendSearchWindow => {
+            if let Some(window_id) = state.add_friend_search_window_id {
+                return window::gain_focus(window_id);
+            }
+
+            let (window_id, task) = window::open(add_friend_search_window_settings());
+            state.add_friend_search_window_id = Some(window_id);
+            task.map(|window_id| AppMessage::AddFriendSearchWindowOpened { window_id })
+        }
+
+        AppMessage::CloseAddFriendSearchWindow => {
+            if let Some(window_id) = state.add_friend_search_window_id.take() {
+                return window::close(window_id);
+            }
             Task::none()
+        }
+
+        AppMessage::WindowCloseRequested { window_id } => {
+            if state.main_window_id == Some(window_id) {
+                return iced::exit();
+            }
+            if state.add_friend_search_window_id == Some(window_id) {
+                state.add_friend_search_window_id = None;
+            }
+            window::close(window_id)
         }
 
         AppMessage::ToggleSettingsMenu => {
@@ -260,11 +363,108 @@ pub fn update(
         AppMessage::AddFriendInputChanged { text } => {
             state.add_friend.add_input = text;
             state.add_friend.feedback = None;
+            state.add_friend.search_error = None;
             Task::none()
         }
 
         AppMessage::AddFriendSearchChanged { text } => {
             state.add_friend.search_input = text;
+            Task::none()
+        }
+
+        AppMessage::AddFriendSearchPressed => {
+            let query = state.add_friend.add_input.trim().to_string();
+            if query.is_empty() {
+                state.add_friend.search_error = Some("请输入用户名或 UID".to_string());
+                state.add_friend.search_loading = false;
+                state.add_friend.search_results.clear();
+                state.add_friend.selected_search_user_id = None;
+                return Task::none();
+            }
+
+            state.add_friend.search_loading = true;
+            state.add_friend.search_error = None;
+            state.add_friend.feedback = None;
+            state.add_friend.search_results.clear();
+            state.add_friend.selected_search_user_id = None;
+
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.search_users(query).await },
+                |result| match result {
+                    Ok(users) => AppMessage::AddFriendSearchLoaded { users },
+                    Err(error) => AppMessage::AddFriendSearchFailed { error },
+                },
+            )
+        }
+
+        AppMessage::AddFriendSearchLoaded { users } => {
+            let friend_ids = state
+                .add_friend
+                .friends
+                .iter()
+                .map(|item| item.user_id)
+                .collect::<HashSet<_>>();
+            let mut users = users;
+            for user in &mut users {
+                if friend_ids.contains(&user.user_id) {
+                    user.is_friend = true;
+                }
+            }
+            state.add_friend.search_loading = false;
+            state.add_friend.search_results = users;
+            state.add_friend.selected_search_user_id = state
+                .add_friend
+                .search_results
+                .first()
+                .map(|user| user.user_id);
+            if state.add_friend.search_results.is_empty() {
+                state.add_friend.search_error = Some("未找到匹配用户".to_string());
+            } else {
+                state.add_friend.search_error = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::AddFriendSearchFailed { error } => {
+            state.add_friend.search_loading = false;
+            state.add_friend.search_results.clear();
+            state.add_friend.selected_search_user_id = None;
+            state.add_friend.search_error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::AddFriendResultSelected { user_id } => {
+            state.add_friend.selected_search_user_id = Some(user_id);
+            state.add_friend.feedback = None;
+            Task::none()
+        }
+
+        AppMessage::AddFriendPanelSelected { item } => {
+            state.add_friend.selected_panel_item = Some(item);
+            state.add_friend.detail_loading = true;
+            state.add_friend.detail = None;
+            state.add_friend.detail_error = None;
+            schedule_add_friend_detail_load(bridge, item)
+        }
+
+        AppMessage::AddFriendDetailLoaded { item, detail } => {
+            if state.add_friend.selected_panel_item != Some(item) {
+                return Task::none();
+            }
+            state.add_friend.detail_loading = false;
+            state.add_friend.detail_error = None;
+            state.add_friend.detail = Some(detail);
+            Task::none()
+        }
+
+        AppMessage::AddFriendDetailLoadFailed { item, error } => {
+            if state.add_friend.selected_panel_item != Some(item) {
+                return Task::none();
+            }
+            state.add_friend.detail_loading = false;
+            state.add_friend.detail = None;
+            state.add_friend.detail_error = Some(format_ui_error(&error));
             Task::none()
         }
 
@@ -284,11 +484,57 @@ pub fn update(
         }
 
         AppMessage::AddFriendRequestPressed => {
-            if state.add_friend.add_input.trim().is_empty() {
-                state.add_friend.feedback = Some("请输入用户名或 UID".to_string());
+            let selected = state
+                .add_friend
+                .selected_search_user_id
+                .and_then(|selected_user_id| {
+                    state
+                        .add_friend
+                        .search_results
+                        .iter()
+                        .find(|user| user.user_id == selected_user_id)
+                        .cloned()
+                })
+                .or_else(|| state.add_friend.search_results.first().cloned());
+
+            let Some(target) = selected else {
+                state.add_friend.feedback = Some("请先搜索并选择用户".to_string());
+                return Task::none();
+            };
+
+            if target.is_friend {
+                state.add_friend.feedback = Some("该用户已是好友".to_string());
                 return Task::none();
             }
-            state.add_friend.feedback = Some("好友申请已发送（接 SDK 前的 UI 页面）".to_string());
+
+            state.add_friend.feedback = Some("发送好友申请中...".to_string());
+
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    bridge
+                        .send_friend_request(target.user_id, None, Some(target.search_session_id))
+                        .await
+                },
+                |result| match result {
+                    Ok(user_id) => AppMessage::AddFriendRequestSucceeded { user_id },
+                    Err(error) => AppMessage::AddFriendRequestFailed { error },
+                },
+            )
+        }
+
+        AppMessage::AddFriendRequestSucceeded { user_id } => {
+            for user in &mut state.add_friend.search_results {
+                if user.user_id == user_id {
+                    user.is_friend = true;
+                }
+            }
+            state.add_friend.feedback = Some("好友申请已发送".to_string());
+            schedule_add_friend_refresh(bridge)
+        }
+
+        AppMessage::AddFriendRequestFailed { error } => {
+            state.add_friend.feedback = Some(format!("发送失败: {}", format_ui_error(&error)));
             Task::none()
         }
 
@@ -445,6 +691,18 @@ pub fn update(
     }
 }
 
+fn add_friend_search_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(640.0, 840.0),
+        min_size: Some(Size::new(520.0, 700.0)),
+        resizable: true,
+        decorations: true,
+        level: window::Level::Normal,
+        position: window::Position::Centered,
+        ..window::Settings::default()
+    }
+}
+
 fn handle_conversation_selected(
     state: &mut AppState,
     bridge: &Arc<dyn SdkBridge>,
@@ -510,6 +768,15 @@ fn apply_logout(state: &mut AppState) {
     state.session_list.items.clear();
     state.session_list.load_error = None;
     state.session_list.total_unread_count = 0;
+    state.add_friend.friends.clear();
+    state.add_friend.groups.clear();
+    state.add_friend.requests.clear();
+    state.add_friend.selected_panel_item = None;
+    state.add_friend.detail = None;
+    state.add_friend.detail_error = None;
+    state.add_friend.contacts_error = None;
+    state.add_friend.search_results.clear();
+    state.add_friend.feedback = None;
     state.auth.is_submitting = false;
     state.auth.error = None;
     state.auth.password.clear();
@@ -538,6 +805,69 @@ fn schedule_total_unread_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage
             Err(error) => AppMessage::TotalUnreadCountLoadFailed { error },
         },
     )
+}
+
+fn schedule_add_friend_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+    let friends_bridge = Arc::clone(bridge);
+    let groups_bridge = Arc::clone(bridge);
+    let requests_bridge = Arc::clone(bridge);
+
+    Task::batch([
+        Task::perform(
+            async move { friends_bridge.load_friend_list().await },
+            |result| match result {
+                Ok(items) => AppMessage::AddFriendFriendsLoaded { items },
+                Err(error) => AppMessage::AddFriendFriendsLoadFailed { error },
+            },
+        ),
+        Task::perform(
+            async move { groups_bridge.load_group_list().await },
+            |result| match result {
+                Ok(items) => AppMessage::AddFriendGroupsLoaded { items },
+                Err(error) => AppMessage::AddFriendGroupsLoadFailed { error },
+            },
+        ),
+        Task::perform(
+            async move { requests_bridge.load_friend_request_list().await },
+            |result| match result {
+                Ok(items) => AppMessage::AddFriendRequestsLoaded { items },
+                Err(error) => AppMessage::AddFriendRequestsLoadFailed { error },
+            },
+        ),
+    ])
+}
+
+fn schedule_add_friend_detail_load(
+    bridge: &Arc<dyn SdkBridge>,
+    item: AddFriendSelectionVm,
+) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.load_add_friend_detail(item).await },
+        move |result| match result {
+            Ok(detail) => AppMessage::AddFriendDetailLoaded { item, detail },
+            Err(error) => AppMessage::AddFriendDetailLoadFailed { item, error },
+        },
+    )
+}
+
+fn sync_add_friend_flags(state: &mut AppState) {
+    let friend_ids = state
+        .add_friend
+        .friends
+        .iter()
+        .map(|item| item.user_id)
+        .collect::<HashSet<_>>();
+
+    for user in &mut state.add_friend.search_results {
+        if friend_ids.contains(&user.user_id) {
+            user.is_friend = true;
+        }
+    }
+
+    for request in &mut state.add_friend.requests {
+        request.is_added = friend_ids.contains(&request.from_user_id);
+    }
 }
 
 fn handle_login_submit(
@@ -599,7 +929,19 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         }
         None => return Task::none(),
     };
-    let client_txn_id = state.allocate_client_txn_id();
+    let client_txn_id = match bridge.generate_local_message_id() {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(
+                "generate_local_message_id failed: {}",
+                format_ui_error(&error)
+            );
+            state.auth.error = Some(format!("发送失败: {}", format_ui_error(&error)));
+            return Task::none();
+        }
+    };
+    let from_uid = state.auth.user_id.unwrap_or(0);
+    let now = now_timestamp_millis();
 
     if let Some(chat) = &mut state.active_chat {
         let local_echo = MessageVm {
@@ -609,12 +951,12 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             message_id: client_txn_id,
             server_message_id: None,
             client_txn_id: Some(client_txn_id),
-            from_uid: 0,
+            from_uid,
             body: body.clone(),
-            message_type: 1,
-            created_at: now_timestamp_millis(),
+            message_type: 0,
+            created_at: now,
             pts: None,
-            send_state: Some(MessageSendStateVm::Queued),
+            send_state: Some(MessageSendStateVm::Sending),
             is_own: true,
             is_deleted: false,
         };
@@ -624,6 +966,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         chat.composer.editor = iced::widget::text_editor::Content::new();
         chat.composer.emoji_picker_open = false;
     }
+    touch_session_preview(state, channel_id, channel_type, &body, now);
 
     let bridge = Arc::clone(bridge);
     Task::perform(
@@ -633,19 +976,47 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
                 .await
         },
         move |result| match result {
-            Ok(()) => AppMessage::Noop,
-            Err(error) => AppMessage::TimelinePatched {
+            Ok(message_id) => AppMessage::TimelineUpdatedIngress {
                 channel_id,
                 channel_type,
                 open_token,
-                revision: events::allocate_patch_revision(),
-                patch: TimelinePatchVm::UpdateSendState {
-                    client_txn_id,
-                    send_state: MessageSendStateVm::FailedRetryable { reason: error },
-                },
+                message_id,
             },
+            Err(error) => {
+                warn!(
+                    "send_text_message failed: channel_id={} channel_type={} client_txn_id={} error={}",
+                    channel_id, channel_type, client_txn_id, format_ui_error(&error)
+                );
+                AppMessage::TimelinePatched {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    revision: events::allocate_patch_revision(),
+                    patch: TimelinePatchVm::RemoveMessage {
+                        key: TimelineItemKey::Local(client_txn_id),
+                    },
+                }
+            }
         },
     )
+}
+
+fn touch_session_preview(
+    state: &mut AppState,
+    channel_id: u64,
+    channel_type: i32,
+    preview: &str,
+    timestamp_ms: i64,
+) {
+    if let Some(item) = state
+        .session_list
+        .items
+        .iter_mut()
+        .find(|entry| entry.channel_id == channel_id && entry.channel_type == channel_type)
+    {
+        item.subtitle = preview.to_string();
+        item.last_msg_timestamp = timestamp_ms;
+    }
 }
 
 fn handle_retry_send_pressed(
@@ -717,10 +1088,38 @@ fn handle_timeline_updated_ingress(
         async move { bridge.load_message_vm(message_id).await },
         move |result| match result {
             Ok(Some(remote)) => {
+                if remote.channel_id != channel_id || remote.channel_type != channel_type {
+                    warn!(
+                        "timeline ingress channel mismatch: msg={} got={}/{} expected={}/{}",
+                        message_id,
+                        remote.channel_id,
+                        remote.channel_type,
+                        channel_id,
+                        channel_type
+                    );
+                    return AppMessage::RefreshSessionList;
+                }
+                let resolved_client_txn_id = replacement_client_txn_id.or(remote.client_txn_id);
                 if remote.server_message_id.is_none() {
+                    if let Some(client_txn_id) = resolved_client_txn_id {
+                        if let Some(send_state) = remote.send_state.clone() {
+                            if !matches!(send_state, MessageSendStateVm::Queued) {
+                                return AppMessage::TimelinePatched {
+                                    channel_id,
+                                    channel_type,
+                                    open_token,
+                                    revision: events::allocate_patch_revision(),
+                                    patch: TimelinePatchVm::UpdateSendState {
+                                        client_txn_id,
+                                        send_state,
+                                    },
+                                };
+                            }
+                        }
+                    }
                     return AppMessage::Noop;
                 }
-                let patch = match replacement_client_txn_id {
+                let patch = match resolved_client_txn_id {
                     Some(client_txn_id) => TimelinePatchVm::ReplaceLocalEcho {
                         client_txn_id,
                         remote,
@@ -736,7 +1135,15 @@ fn handle_timeline_updated_ingress(
                     patch,
                 }
             }
-            Ok(None) | Err(_) => AppMessage::Noop,
+            Ok(None) => AppMessage::Noop,
+            Err(error) => {
+                warn!(
+                    "timeline ingress load_message_vm failed: message_id={} error={}",
+                    message_id,
+                    format_ui_error(&error)
+                );
+                AppMessage::Noop
+            }
         },
     )
 }
@@ -1092,6 +1499,10 @@ mod tests {
 
     #[async_trait]
     impl SdkBridge for StubBridge {
+        fn generate_local_message_id(&self) -> Result<u64, UiError> {
+            Ok(1)
+        }
+
         async fn restore_session(
             &self,
         ) -> Result<Option<crate::presentation::vm::LoginSessionVm>, UiError> {
@@ -1110,6 +1521,47 @@ mod tests {
 
         async fn logout(&self) -> Result<(), UiError> {
             Ok(())
+        }
+
+        async fn search_users(
+            &self,
+            _query: String,
+        ) -> Result<Vec<crate::presentation::vm::SearchUserVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn send_friend_request(
+            &self,
+            _to_user_id: u64,
+            _remark: Option<String>,
+            _search_session_id: Option<u64>,
+        ) -> Result<u64, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn load_friend_list(
+            &self,
+        ) -> Result<Vec<crate::presentation::vm::FriendListItemVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_group_list(
+            &self,
+        ) -> Result<Vec<crate::presentation::vm::GroupListItemVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_friend_request_list(
+            &self,
+        ) -> Result<Vec<crate::presentation::vm::FriendRequestItemVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_add_friend_detail(
+            &self,
+            _item: crate::presentation::vm::AddFriendSelectionVm,
+        ) -> Result<crate::presentation::vm::AddFriendDetailVm, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
         }
 
         async fn login_with_password(
@@ -1136,7 +1588,7 @@ mod tests {
             _channel_type: i32,
             _client_txn_id: u64,
             _body: String,
-        ) -> Result<(), UiError> {
+        ) -> Result<u64, UiError> {
             Err(UiError::Unknown("unused".to_string()))
         }
 
