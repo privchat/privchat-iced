@@ -5,6 +5,7 @@ pub enum Route {
     Login,
     SessionList,
     Chat,
+    AddFriend,
     Settings,
 }
 

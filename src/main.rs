@@ -56,7 +56,7 @@ fn view(app: &PrivchatApp) -> Element<'_, AppMessage> {
     match app.state.route {
         Route::Splash => ui::screens::splash::view(),
         Route::Login => ui::screens::login::view(&app.state.auth),
-        Route::Chat | Route::Settings | Route::SessionList => {
+        Route::Chat | Route::AddFriend | Route::Settings | Route::SessionList => {
             ui::screens::workspace::view(&app.state)
         }
     }

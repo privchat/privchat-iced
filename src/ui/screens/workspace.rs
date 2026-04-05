@@ -1,11 +1,11 @@
-use iced::widget::{column, container, mouse_area, row, stack, text};
+use iced::widget::{button, column, container, mouse_area, row, stack, text};
 use iced::{alignment, border, mouse, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
 use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::ui::icons::{self, Icon};
-use crate::ui::screens::{chat, session_list, settings};
+use crate::ui::screens::{add_friend, chat, session_list, settings};
 
 const SIDEBAR_WIDTH: f32 = 70.0;
 const C_ROOT_BG: Color = Color::from_rgb8(0x1F, 0x23, 0x29);
@@ -13,6 +13,9 @@ const C_SIDEBAR_BG: Color = Color::from_rgb8(0x22, 0x29, 0x31);
 const C_LIST_BG: Color = Color::from_rgb8(0x2A, 0x2D, 0x33);
 const C_CHAT_BG: Color = Color::from_rgb8(0x18, 0x1A, 0x1F);
 const C_DIVIDER: Color = Color::from_rgb8(0x35, 0x39, 0x40);
+const SETTINGS_MENU_WIDTH: f32 = 132.0;
+const SETTINGS_MENU_BOTTOM_GAP: f32 = 56.0;
+const SETTINGS_MENU_LEFT_OFFSET: f32 = SIDEBAR_WIDTH + 8.0;
 
 /// Render authenticated desktop workspace with WeChat-like 3-column layout.
 pub fn view(state: &AppState) -> Element<'_, AppMessage> {
@@ -40,17 +43,27 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
                 empty_detail("请选择一个会话")
             }
         }
+        Route::AddFriend => add_friend::detail_view(),
         Route::Settings => settings::view(&state.settings),
         Route::SessionList => empty_detail("请选择一个会话"),
         Route::Login => empty_detail(""),
         Route::Splash => empty_detail(""),
     };
 
-    container(
+    let middle_panel: Element<'_, AppMessage> = match state.route {
+        Route::AddFriend => add_friend::panel_view(&state.add_friend, &state.session_list),
+        _ => session_list::view(
+            &state.session_list,
+            active_chat,
+            state.layout.session_list_width,
+        ),
+    };
+
+    let workspace = container(
         row![
             sidebar(state),
             divider(),
-            container(session_list::view(&state.session_list, active_chat))
+            container(middle_panel)
                 .width(Length::Fixed(state.layout.session_list_width))
                 .height(Length::Fill)
                 .style(|_| panel(C_LIST_BG)),
@@ -64,28 +77,60 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     )
     .width(Length::Fill)
     .height(Length::Fill)
-    .style(|_| panel(C_ROOT_BG))
-    .into()
+    .style(|_| panel(C_ROOT_BG));
+
+    if state.overlay.settings_menu_open {
+        stack![
+            workspace,
+            mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+                .on_press(AppMessage::DismissSettingsMenu),
+            settings_menu_layer(),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        workspace.into()
+    }
 }
 
 fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
     let message_badge_count = (state.session_list.total_unread_count > 0)
         .then_some(state.session_list.total_unread_count);
+    let message_active = matches!(state.route, Route::SessionList | Route::Chat);
+    let add_friend_active = matches!(state.route, Route::AddFriend);
+    let settings_active =
+        matches!(state.route, Route::Settings) || state.overlay.settings_menu_open;
 
     let top = column![
         avatar_chip(state.auth.user_id),
-        nav_icon(Icon::Message, true, message_badge_count),
-        nav_icon(Icon::Contact, false, None),
-        nav_icon(Icon::Box, false, None),
-        nav_icon(Icon::Compass, false, None),
-        nav_icon(Icon::Link, false, None),
+        nav_icon(
+            Icon::Message,
+            message_active,
+            message_badge_count,
+            AppMessage::OpenSessionListPage
+        ),
+        nav_icon(
+            Icon::Contact,
+            add_friend_active,
+            None,
+            AppMessage::OpenAddFriendPage
+        ),
+        nav_icon(Icon::Box, false, None, AppMessage::Noop),
+        nav_icon(Icon::Compass, false, None, AppMessage::Noop),
+        nav_icon(Icon::Link, false, None, AppMessage::Noop),
     ]
     .spacing(12)
     .align_x(alignment::Horizontal::Center);
 
-    let bottom = column![nav_icon(Icon::Settings, false, None),]
-        .spacing(12)
-        .align_x(alignment::Horizontal::Center);
+    let bottom = column![nav_icon(
+        Icon::Settings,
+        settings_active,
+        None,
+        AppMessage::ToggleSettingsMenu
+    )]
+    .spacing(12)
+    .align_x(alignment::Horizontal::Center);
 
     container(
         column![top, container(text("")).height(Length::Fill), bottom,]
@@ -120,7 +165,12 @@ fn avatar_chip(user_id: Option<u64>) -> Element<'static, AppMessage> {
     .into()
 }
 
-fn nav_icon(icon: Icon, active: bool, badge_count: Option<u32>) -> Element<'static, AppMessage> {
+fn nav_icon(
+    icon: Icon,
+    active: bool,
+    badge_count: Option<u32>,
+    on_press: AppMessage,
+) -> Element<'static, AppMessage> {
     let icon_color = if active {
         Color::from_rgb8(0xF3, 0xF6, 0xF8)
     } else {
@@ -142,7 +192,7 @@ fn nav_icon(icon: Icon, active: bool, badge_count: Option<u32>) -> Element<'stat
             ..container::Style::default()
         });
 
-    if let Some(count) = badge_count {
+    let content: Element<'static, AppMessage> = if let Some(count) = badge_count {
         let label = if count > 99 {
             "99+".to_string()
         } else {
@@ -180,16 +230,119 @@ fn nav_icon(icon: Icon, active: bool, badge_count: Option<u32>) -> Element<'stat
         .width(Length::Fixed(52.0))
         .height(Length::Fixed(44.0));
 
-        return container(layered)
+        container(layered)
             .width(Length::Fill)
             .align_x(alignment::Horizontal::Center)
-            .into();
-    }
+            .into()
+    } else {
+        container(chip)
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Center)
+            .into()
+    };
 
-    container(chip)
+    button(content)
         .width(Length::Fill)
-        .align_x(alignment::Horizontal::Center)
+        .padding(0)
+        .style(nav_button_style)
+        .on_press(on_press)
         .into()
+}
+
+fn nav_button_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered => {
+            Some(Background::Color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.03)))
+        }
+        button::Status::Pressed => {
+            Some(Background::Color(Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.06)))
+        }
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color: Color::TRANSPARENT,
+        border: border::width(0.0),
+        shadow: Default::default(),
+        snap: true,
+    }
+}
+
+fn settings_menu_layer() -> Element<'static, AppMessage> {
+    container(
+        column![
+            container(text("")).height(Length::Fill),
+            row![
+                container(text("")).width(Length::Fixed(SETTINGS_MENU_LEFT_OFFSET)),
+                settings_menu_popup(),
+                container(text("")).width(Length::Fill),
+            ]
+            .height(Length::Shrink),
+            container(text("")).height(Length::Fixed(SETTINGS_MENU_BOTTOM_GAP)),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .into()
+}
+
+fn settings_menu_popup() -> Element<'static, AppMessage> {
+    container(
+        column![
+            button(
+                container(
+                    text("设置")
+                        .size(14)
+                        .color(Color::from_rgb8(0xE6, 0xEB, 0xF2))
+                )
+                .width(Length::Fill)
+                .padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .style(menu_item_style)
+            .on_press(AppMessage::SettingsMenuOpenSettings),
+            button(
+                container(
+                    text("退出")
+                        .size(14)
+                        .color(Color::from_rgb8(0xE6, 0xB0, 0x8C))
+                )
+                .width(Length::Fill)
+                .padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .style(menu_item_style)
+            .on_press(AppMessage::SettingsMenuLogout),
+        ]
+        .spacing(2),
+    )
+    .width(Length::Fixed(SETTINGS_MENU_WIDTH))
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgb8(0x2C, 0x30, 0x37))),
+        border: border::rounded(8.0)
+            .width(1.0)
+            .color(Color::from_rgb8(0x3B, 0x41, 0x4A)),
+        ..container::Style::default()
+    })
+    .into()
+}
+
+fn menu_item_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let background = match status {
+        button::Status::Hovered => Some(Background::Color(Color::from_rgb8(0x39, 0x3E, 0x47))),
+        button::Status::Pressed => Some(Background::Color(Color::from_rgb8(0x43, 0x48, 0x52))),
+        _ => None,
+    };
+
+    button::Style {
+        background,
+        text_color: Color::TRANSPARENT,
+        border: border::rounded(6.0),
+        shadow: Default::default(),
+        snap: true,
+    }
 }
 
 fn divider() -> Element<'static, AppMessage> {

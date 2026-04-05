@@ -4,14 +4,20 @@ use iced::{alignment, border, Background, Color, Element, Length, Theme};
 use crate::app::message::AppMessage;
 use crate::presentation::vm::{MessageSendStateVm, MessageVm};
 
-fn send_state_label(state: &MessageSendStateVm) -> &'static str {
+fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static str {
     match state {
-        MessageSendStateVm::Queued => "queued",
-        MessageSendStateVm::Sending => "sending",
-        MessageSendStateVm::Sent => "sent",
-        MessageSendStateVm::Retrying => "retrying",
-        MessageSendStateVm::FailedRetryable { .. } => "failed",
-        MessageSendStateVm::FailedPermanent { .. } => "failed",
+        MessageSendStateVm::Queued => "发送中",
+        MessageSendStateVm::Sending => "发送中",
+        MessageSendStateVm::Retrying => "发送中",
+        MessageSendStateVm::Sent => {
+            if read_hint {
+                "已读"
+            } else {
+                "已发送"
+            }
+        }
+        MessageSendStateVm::FailedRetryable { .. } => "发送失败",
+        MessageSendStateVm::FailedPermanent { .. } => "发送失败",
     }
 }
 
@@ -28,11 +34,48 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
         Color::from_rgb8(0xEC, 0xEF, 0xF3)
     };
 
+    let time_text = format_message_time(message.created_at);
+    let footer: Element<'_, AppMessage> = if message.is_own {
+        let status_label = message
+            .send_state
+            .as_ref()
+            .map(|state| send_state_label_zh(state, message.pts.is_some()))
+            .unwrap_or("已发送");
+
+        container(
+            row![
+                text(time_text)
+                    .size(11)
+                    .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
+                text(status_label)
+                    .size(11)
+                    .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.70)),
+            ]
+            .spacing(8),
+        )
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Left)
+        .into()
+    } else {
+        container(
+            text(time_text)
+                .size(11)
+                .color(Color::from_rgb8(0x8E, 0x95, 0x9E)),
+        )
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .into()
+    };
+
     let bubble = container(
-        text(&message.body)
-            .size(15)
-            .line_height(iced::widget::text::LineHeight::Relative(1.28))
-            .color(bubble_text),
+        column![
+            text(&message.body)
+                .size(15)
+                .line_height(iced::widget::text::LineHeight::Relative(1.28))
+                .color(bubble_text),
+            footer,
+        ]
+        .spacing(8),
     )
     .max_width(560.0)
     .padding([10, 13])
@@ -45,14 +88,9 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
     let mut body = column![bubble].spacing(4);
     if message.is_own {
         if let Some(send_state) = &message.send_state {
-            let mut meta = row![text(send_state_label(send_state))
-                .size(11)
-                .color(Color::from_rgb8(0x8E, 0x95, 0x9E))]
-            .spacing(8);
-
             if matches!(send_state, MessageSendStateVm::FailedRetryable { .. }) {
                 if let Some(client_txn_id) = message.client_txn_id {
-                    meta = meta.push(
+                    body = body.push(
                         button(text("Retry").size(11))
                             .style(retry_button_style)
                             .on_press(AppMessage::RetrySendPressed {
@@ -63,7 +101,6 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
                     );
                 }
             }
-            body = body.push(meta);
         }
     }
 
@@ -82,10 +119,12 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
 }
 
 fn avatar_chip(is_own: bool) -> Element<'static, AppMessage> {
+    const C_LIST_AVATAR: Color = Color::from_rgb8(0x5A, 0x6F, 0x86);
+
     let (bg, label) = if is_own {
         (Color::from_rgb8(0x3E, 0x56, 0x78), "ME")
     } else {
-        (Color::from_rgb8(0x6A, 0x4E, 0x2C), "OT")
+        (C_LIST_AVATAR, "OT")
     };
 
     container(
@@ -95,8 +134,8 @@ fn avatar_chip(is_own: bool) -> Element<'static, AppMessage> {
     )
     .width(Length::Fixed(38.0))
     .height(Length::Fixed(38.0))
-    .center_x(Length::Fill)
-    .center_y(Length::Fill)
+    .align_x(alignment::Horizontal::Center)
+    .align_y(alignment::Vertical::Center)
     .style(move |_| container::Style {
         background: Some(Background::Color(bg)),
         border: border::rounded(6.0),
@@ -121,4 +160,21 @@ fn retry_button_style(_theme: &Theme, status: button::Status) -> button::Style {
 
 fn fill() -> Element<'static, AppMessage> {
     container(text("")).width(Length::Fill).into()
+}
+
+fn format_message_time(created_at: i64) -> String {
+    if created_at <= 0 {
+        return "--:--".to_string();
+    }
+
+    let seconds = if created_at > 1_000_000_000_000 {
+        created_at / 1000
+    } else {
+        created_at
+    };
+
+    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
+    let hour = normalized / 3_600;
+    let minute = (normalized % 3_600) / 60;
+    format!("{hour:02}:{minute:02}")
 }

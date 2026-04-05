@@ -67,8 +67,33 @@ impl Default for SessionListState {
 #[derive(Debug, Default)]
 pub struct SettingsState;
 
+#[derive(Debug)]
+pub struct AddFriendState {
+    pub add_input: String,
+    pub search_input: String,
+    pub feedback: Option<String>,
+    pub new_friends_expanded: bool,
+    pub groups_expanded: bool,
+    pub friends_expanded: bool,
+}
+
+impl Default for AddFriendState {
+    fn default() -> Self {
+        Self {
+            add_input: String::new(),
+            search_input: String::new(),
+            feedback: None,
+            new_friends_expanded: false,
+            groups_expanded: false,
+            friends_expanded: true,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
-pub struct OverlayState;
+pub struct OverlayState {
+    pub settings_menu_open: bool,
+}
 
 pub struct ComposerState {
     pub draft: String,
@@ -170,6 +195,7 @@ pub struct AppState {
     pub auth: AuthState,
     pub layout: WorkspaceLayoutState,
     pub session_list: SessionListState,
+    pub add_friend: AddFriendState,
     pub settings: SettingsState,
     pub overlay: OverlayState,
     next_open_token: OpenToken,
@@ -187,7 +213,7 @@ pub struct WorkspaceLayoutState {
 impl Default for WorkspaceLayoutState {
     fn default() -> Self {
         Self {
-            session_list_width: 360.0,
+            session_list_width: 260.0,
             is_resizing_session_splitter: false,
             last_cursor_x: None,
             window_width: 1024.0,
@@ -203,8 +229,9 @@ impl AppState {
             auth: AuthState::default(),
             layout: WorkspaceLayoutState::default(),
             session_list: SessionListState::default(),
+            add_friend: AddFriendState::default(),
             settings: SettingsState,
-            overlay: OverlayState,
+            overlay: OverlayState::default(),
             next_open_token: 1,
             next_client_txn_id: 1,
         }

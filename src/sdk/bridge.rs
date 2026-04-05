@@ -20,6 +20,7 @@ pub trait SdkBridge: Send + Sync + 'static {
     async fn restore_session(&self) -> Result<Option<LoginSessionVm>, UiError>;
     async fn load_session_list(&self) -> Result<Vec<SessionListItemVm>, UiError>;
     async fn load_total_unread_count(&self, exclude_muted: bool) -> Result<u32, UiError>;
+    async fn logout(&self) -> Result<(), UiError>;
 
     async fn login_with_password(
         &self,
@@ -210,6 +211,16 @@ impl SdkBridge for PrivchatSdkBridge {
         Ok(unread.max(0) as u32)
     }
 
+    async fn logout(&self) -> Result<(), UiError> {
+        // Best-effort remote logout; local cleanup must still run.
+        let _ = self
+            .sdk
+            .rpc_call("account/auth/logout".to_string(), "{}".to_string())
+            .await;
+        let _ = self.sdk.clear_local_state().await.map_err(map_sdk_error);
+        self.sdk.disconnect().await.map_err(map_sdk_error)
+    }
+
     async fn login_with_password(
         &self,
         username: String,
@@ -359,11 +370,33 @@ impl SdkBridge for PrivchatSdkBridge {
         before_server_message_id: Option<u64>,
         limit: usize,
     ) -> Result<HistoryPageVm, UiError> {
-        let _ = (channel_id, channel_type, before_server_message_id, limit);
-        Err(UiError::Unknown(
-            "load_history_before is not wired: waiting for SDK-native history API binding"
-                .to_string(),
-        ))
+        let current_uid = self.current_uid().await?;
+        let messages = self
+            .sdk
+            .list_messages(channel_id, channel_type, 3000, 0)
+            .await
+            .map_err(map_sdk_error)?;
+
+        let all = adapter::map_history_messages_to_vm(&messages, current_uid, false).items;
+
+        let split_index = if let Some(before) = before_server_message_id {
+            all.iter()
+                .position(|message| message.server_message_id == Some(before))
+                .unwrap_or(all.len())
+        } else {
+            all.len()
+        };
+
+        let older_slice = &all[..split_index];
+        let page_start = older_slice.len().saturating_sub(limit.max(1));
+        let items = older_slice[page_start..].to_vec();
+        let oldest_server_message_id = items.iter().filter_map(|m| m.server_message_id).min();
+
+        Ok(HistoryPageVm {
+            has_more_before: page_start > 0,
+            items,
+            oldest_server_message_id,
+        })
     }
 
     async fn load_message_vm(&self, message_id: u64) -> Result<Option<MessageVm>, UiError> {

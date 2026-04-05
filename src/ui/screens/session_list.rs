@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, scrollable, text, text_input};
+use iced::widget::{button, column, container, row, scrollable, stack, text, text_input};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
@@ -15,6 +15,7 @@ const C_LIST_SELECTED: Color = Color::from_rgb8(0x4C, 0x50, 0x57);
 pub fn view(
     session_list: &SessionListState,
     active_chat: Option<(u64, i32)>,
+    panel_width: f32,
 ) -> Element<'_, AppMessage> {
     let mut list = column!().spacing(0);
 
@@ -45,7 +46,7 @@ pub fn view(
             let selected = active_chat.is_some_and(|(channel_id, channel_type)| {
                 channel_id == item.channel_id && channel_type == item.channel_type
             });
-            list = list.push(conversation_item(item, selected));
+            list = list.push(conversation_item(item, selected, panel_width));
         }
     }
 
@@ -99,32 +100,33 @@ fn search_bar() -> Element<'static, AppMessage> {
         .into()
 }
 
-fn conversation_item(item: &SessionListItemState, selected: bool) -> Element<'_, AppMessage> {
-    let display_title = truncate_nickname(&item.title, 9);
-
-    let avatar = container(text(""))
-        .width(Length::Fixed(40.0))
-        .height(Length::Fixed(40.0))
-        .style(|_| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(0x5A, 0x6F, 0x86))),
-            border: border::rounded(6.0),
-            ..container::Style::default()
-        });
+fn conversation_item(
+    item: &SessionListItemState,
+    selected: bool,
+    panel_width: f32,
+) -> Element<'_, AppMessage> {
+    let (title_max_chars, subtitle_max_chars) = text_budget_from_panel_width(panel_width);
+    let display_title = truncate_single_line(&item.title, title_max_chars);
+    let display_subtitle = truncate_single_line(&item.subtitle, subtitle_max_chars);
 
     let row = row![
-        avatar,
+        avatar_with_badge(item.unread_count),
         column![
             row![
-                text(display_title)
-                    .size(14)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .color(Color::from_rgb8(0xEA, 0xEE, 0xF4)),
+                container(
+                    text(display_title)
+                        .size(14)
+                        .wrapping(iced::widget::text::Wrapping::None)
+                        .color(Color::from_rgb8(0xEA, 0xEE, 0xF4))
+                )
+                .width(Length::Fill),
                 container(session_item_meta(item))
-                    .width(Length::Fill)
+                    .width(Length::Fixed(52.0))
                     .align_x(alignment::Horizontal::Right),
             ],
-            text(&item.subtitle)
+            text(display_subtitle)
                 .size(12)
+                .wrapping(iced::widget::text::Wrapping::None)
                 .color(Color::from_rgb8(0xA4, 0xAB, 0xB4)),
         ]
         .spacing(5)
@@ -219,18 +221,13 @@ fn session_item_meta(item: &SessionListItemState) -> Element<'static, AppMessage
         Err(err) => (err.to_string(), Color::from_rgb8(0xD0, 0x6B, 0x6B)),
     };
 
-    let mut right = column![text(time_text)
+    column![text(time_text)
         .size(12)
         .wrapping(iced::widget::text::Wrapping::None)
         .color(time_color)]
     .spacing(6)
-    .align_x(alignment::Horizontal::Right);
-
-    if item.unread_count > 0 {
-        right = right.push(unread_badge(item.unread_count));
-    }
-
-    right.into()
+    .align_x(alignment::Horizontal::Right)
+    .into()
 }
 
 fn unread_badge(unread_count: u32) -> Element<'static, AppMessage> {
@@ -250,6 +247,45 @@ fn unread_badge(unread_count: u32) -> Element<'static, AppMessage> {
         .into()
 }
 
+fn avatar_with_badge(unread_count: u32) -> Element<'static, AppMessage> {
+    let avatar = container(text(""))
+        .width(Length::Fixed(40.0))
+        .height(Length::Fixed(40.0))
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x5A, 0x6F, 0x86))),
+            border: border::rounded(6.0),
+            ..container::Style::default()
+        });
+
+    let avatar_layer = container(avatar)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Left)
+        .align_y(alignment::Vertical::Bottom);
+
+    if unread_count == 0 {
+        return container(avatar_layer)
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(44.0))
+            .into();
+    }
+
+    let badge = container(unread_badge(unread_count))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .align_y(alignment::Vertical::Top);
+
+    container(
+        stack![avatar_layer, badge]
+            .width(Length::Fixed(48.0))
+            .height(Length::Fixed(44.0)),
+    )
+    .width(Length::Fixed(48.0))
+    .height(Length::Fixed(44.0))
+    .into()
+}
+
 fn format_last_msg_time(last_msg_timestamp: i64) -> Result<String, &'static str> {
     if last_msg_timestamp <= 0 {
         return Err("TIME_ERR");
@@ -267,12 +303,42 @@ fn format_last_msg_time(last_msg_timestamp: i64) -> Result<String, &'static str>
     Ok(format!("{hour:02}:{minute:02}"))
 }
 
-fn truncate_nickname(value: &str, max_chars: usize) -> String {
-    let count = value.chars().count();
-    if count <= max_chars {
+fn truncate_single_line(value: &str, max_chars: usize) -> String {
+    let total_units = value.chars().map(display_units).sum::<usize>();
+    if total_units <= max_chars {
         return value.to_string();
     }
 
-    let kept: String = value.chars().take(max_chars).collect();
-    format!("{kept}...")
+    let mut used = 0usize;
+    let mut kept = String::new();
+    for ch in value.chars() {
+        let units = display_units(ch);
+        if used + units > max_chars.saturating_sub(3) {
+            break;
+        }
+        used += units;
+        kept.push(ch);
+    }
+
+    if kept.is_empty() {
+        "...".to_string()
+    } else {
+        format!("{kept}...")
+    }
+}
+
+fn text_budget_from_panel_width(panel_width: f32) -> (usize, usize) {
+    // Reserve fixed space for avatar, paddings, and time/meta area.
+    let text_px = (panel_width - 142.0).max(120.0);
+    let title_units = (text_px / 6.8).floor() as usize;
+    let subtitle_units = (text_px / 6.2).floor() as usize;
+    (title_units.clamp(14, 180), subtitle_units.clamp(18, 220))
+}
+
+fn display_units(ch: char) -> usize {
+    if ch.is_ascii() {
+        1
+    } else {
+        2
+    }
 }

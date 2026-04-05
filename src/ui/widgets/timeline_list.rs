@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, scrollable, text};
+use iced::widget::{column, container, scrollable, text};
 use iced::{border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
@@ -17,26 +17,10 @@ pub fn view(
 
     if timeline.is_loading_more {
         list = list.push(centered_tip("Loading history..."));
-    } else if timeline.has_more_before {
-        list = list.push(
-            container(
-                button(text("Load older messages").size(12))
-                    .style(load_older_button_style)
-                    .on_press(AppMessage::LoadOlderTriggered {
-                        channel_id,
-                        channel_type,
-                    }),
-            )
-            .width(Length::Fill)
-            .center_x(Length::Fill),
-        );
     }
 
     if !timeline.items.is_empty() {
-        for (index, message) in timeline.items.iter().enumerate() {
-            if show_timestamp(index) {
-                list = list.push(timestamp_separator(message.created_at));
-            }
+        for message in &timeline.items {
             list = list.push(message_bubble::view(message));
         }
     }
@@ -44,6 +28,24 @@ pub fn view(
     scrollable(container(list).width(Length::Fill))
         .height(Length::Fill)
         .width(Length::Fill)
+        .anchor_bottom()
+        .on_scroll(move |viewport| {
+            let mut relative_y = viewport.relative_offset().y;
+            if relative_y.is_nan() {
+                relative_y = 0.0;
+            }
+
+            let at_bottom = relative_y <= 0.02;
+            let near_top = relative_y >= 0.98;
+
+            AppMessage::ViewportChanged {
+                channel_id,
+                channel_type,
+                at_bottom,
+                near_top,
+                first_visible_item: None,
+            }
+        })
         .style(timeline_scroll_style)
         .into()
 }
@@ -59,36 +61,6 @@ fn centered_tip(label: &str) -> Element<'_, AppMessage> {
     .into()
 }
 
-fn show_timestamp(index: usize) -> bool {
-    index == 0 || index % 2 == 0
-}
-
-fn timestamp_separator(created_at: i64) -> Element<'static, AppMessage> {
-    let (label, color) = match format_message_timestamp(created_at) {
-        Ok(value) => (value, Color::from_rgb8(0x8D, 0x94, 0x9E)),
-        Err(err) => (err.to_string(), Color::from_rgb8(0xD0, 0x6B, 0x6B)),
-    };
-
-    container(text(label).size(12).color(color))
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .into()
-}
-
-fn load_older_button_style(_theme: &Theme, status: button::Status) -> button::Style {
-    let fg = match status {
-        button::Status::Hovered | button::Status::Pressed => Color::from_rgb8(0xB8, 0xC0, 0xCA),
-        _ => Color::from_rgb8(0x96, 0x9E, 0xA8),
-    };
-    button::Style {
-        background: None,
-        text_color: fg,
-        border: border::rounded(4.0),
-        shadow: Default::default(),
-        snap: true,
-    }
-}
-
 fn timeline_scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
     let mut style = scrollable::default(theme, status);
     style.container = container::Style {
@@ -99,21 +71,4 @@ fn timeline_scroll_style(theme: &Theme, status: scrollable::Status) -> scrollabl
     style.vertical_rail.scroller.background = Background::Color(Color::from_rgb8(0x4A, 0x50, 0x58));
     style.vertical_rail.scroller.border = border::rounded(6.0);
     style
-}
-
-fn format_message_timestamp(created_at: i64) -> Result<String, &'static str> {
-    if created_at <= 0 {
-        return Err("TIME_ERR");
-    }
-
-    let seconds = if created_at > 1_000_000_000_000 {
-        created_at / 1000
-    } else {
-        created_at
-    };
-
-    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
-    let hour = normalized / 3_600;
-    let minute = (normalized % 3_600) / 60;
-    Ok(format!("{hour:02}:{minute:02}"))
 }

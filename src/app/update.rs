@@ -148,6 +148,51 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::OpenSessionListPage => {
+            state.overlay.settings_menu_open = false;
+            state.route = if state.active_chat.is_some() {
+                Route::Chat
+            } else {
+                Route::SessionList
+            };
+            Task::none()
+        }
+
+        AppMessage::OpenAddFriendPage => {
+            state.overlay.settings_menu_open = false;
+            state.route = Route::AddFriend;
+            Task::none()
+        }
+
+        AppMessage::ToggleSettingsMenu => {
+            state.overlay.settings_menu_open = !state.overlay.settings_menu_open;
+            Task::none()
+        }
+
+        AppMessage::DismissSettingsMenu => {
+            state.overlay.settings_menu_open = false;
+            Task::none()
+        }
+
+        AppMessage::SettingsMenuOpenSettings => {
+            state.overlay.settings_menu_open = false;
+            state.route = Route::Settings;
+            Task::none()
+        }
+
+        AppMessage::SettingsMenuLogout => {
+            apply_logout(state);
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    if let Err(error) = bridge.logout().await {
+                        tracing::warn!("sdk logout failed: {:?}", error);
+                    }
+                },
+                |_| AppMessage::Noop,
+            )
+        }
+
         AppMessage::LoginPressed => handle_login_submit(state, bridge, false),
 
         AppMessage::RegisterPressed => handle_login_submit(state, bridge, true),
@@ -211,6 +256,41 @@ pub fn update(
             channel_id,
             channel_type,
         } => handle_conversation_selected(state, bridge, channel_id, channel_type),
+
+        AppMessage::AddFriendInputChanged { text } => {
+            state.add_friend.add_input = text;
+            state.add_friend.feedback = None;
+            Task::none()
+        }
+
+        AppMessage::AddFriendSearchChanged { text } => {
+            state.add_friend.search_input = text;
+            Task::none()
+        }
+
+        AppMessage::ToggleNewFriendsSection => {
+            state.add_friend.new_friends_expanded = !state.add_friend.new_friends_expanded;
+            Task::none()
+        }
+
+        AppMessage::ToggleGroupSection => {
+            state.add_friend.groups_expanded = !state.add_friend.groups_expanded;
+            Task::none()
+        }
+
+        AppMessage::ToggleFriendSection => {
+            state.add_friend.friends_expanded = !state.add_friend.friends_expanded;
+            Task::none()
+        }
+
+        AppMessage::AddFriendRequestPressed => {
+            if state.add_friend.add_input.trim().is_empty() {
+                state.add_friend.feedback = Some("请输入用户名或 UID".to_string());
+                return Task::none();
+            }
+            state.add_friend.feedback = Some("好友申请已发送（接 SDK 前的 UI 页面）".to_string());
+            Task::none()
+        }
 
         AppMessage::ComposerInputChanged { text } => {
             if let Some(chat) = &mut state.active_chat {
@@ -351,6 +431,7 @@ pub fn update(
             channel_id,
             channel_type,
             at_bottom,
+            near_top,
             first_visible_item,
         } => handle_viewport_changed(
             state,
@@ -358,6 +439,7 @@ pub fn update(
             channel_id,
             channel_type,
             at_bottom,
+            near_top,
             first_visible_item,
         ),
     }
@@ -369,6 +451,8 @@ fn handle_conversation_selected(
     channel_id: u64,
     channel_type: i32,
 ) -> Task<AppMessage> {
+    state.overlay.settings_menu_open = false;
+
     if state.auth.user_id.is_none() {
         state.route = Route::Login;
         return Task::none();
@@ -416,7 +500,22 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     state.auth.token = Some(token);
     state.auth.device_id = device_id;
     state.auth.password.clear();
+    state.overlay.settings_menu_open = false;
     state.route = Route::SessionList;
+}
+
+fn apply_logout(state: &mut AppState) {
+    state.overlay.settings_menu_open = false;
+    state.active_chat = None;
+    state.session_list.items.clear();
+    state.session_list.load_error = None;
+    state.session_list.total_unread_count = 0;
+    state.auth.is_submitting = false;
+    state.auth.error = None;
+    state.auth.password.clear();
+    state.auth.user_id = None;
+    state.auth.token = None;
+    state.route = Route::Login;
 }
 
 fn schedule_session_list_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
@@ -691,6 +790,7 @@ fn handle_viewport_changed(
     channel_id: u64,
     channel_type: i32,
     at_bottom: bool,
+    near_top: bool,
     first_visible_item: Option<TimelineItemKey>,
 ) -> Task<AppMessage> {
     let Some(chat) = &mut state.active_chat else {
@@ -702,6 +802,10 @@ fn handle_viewport_changed(
 
     chat.timeline.at_bottom = at_bottom;
     chat.timeline.first_visible_item = first_visible_item;
+
+    if near_top {
+        return handle_load_older_triggered(state, bridge, channel_id, channel_type);
+    }
 
     if !at_bottom {
         return Task::none();
@@ -1002,6 +1106,10 @@ mod tests {
 
         async fn load_total_unread_count(&self, _exclude_muted: bool) -> Result<u32, UiError> {
             Ok(0)
+        }
+
+        async fn logout(&self) -> Result<(), UiError> {
+            Ok(())
         }
 
         async fn login_with_password(

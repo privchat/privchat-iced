@@ -148,11 +148,12 @@ pub fn map_snapshot_to_vm(
     revision: TimelineRevision,
     unread_marker: UnreadMarkerVm,
 ) -> TimelineSnapshotVm {
-    let items: Vec<MessageVm> = snapshot
+    let mut items: Vec<MessageVm> = snapshot
         .messages
         .iter()
         .map(|m| map_stored_message_to_vm(m, current_uid, None))
         .collect();
+    items.sort_by_key(|item| (item.created_at, item.message_id));
 
     let oldest_server_message_id = derive_oldest_server_message_id(&items);
 
@@ -170,10 +171,11 @@ pub fn map_history_messages_to_vm(
     current_uid: Option<u64>,
     has_more_before: bool,
 ) -> HistoryPageVm {
-    let items: Vec<MessageVm> = messages
+    let mut items: Vec<MessageVm> = messages
         .iter()
         .map(|m| map_stored_message_to_vm(m, current_uid, None))
         .collect();
+    items.sort_by_key(|item| (item.created_at, item.message_id));
 
     let oldest_server_message_id = derive_oldest_server_message_id(&items);
 

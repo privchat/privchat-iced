@@ -1,3 +1,4 @@
+pub mod add_friend;
 pub mod chat;
 pub mod login;
 pub mod session_list;

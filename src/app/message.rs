@@ -45,6 +45,12 @@ pub enum AppMessage {
     WindowResized {
         width: f32,
     },
+    OpenSessionListPage,
+    OpenAddFriendPage,
+    ToggleSettingsMenu,
+    DismissSettingsMenu,
+    SettingsMenuOpenSettings,
+    SettingsMenuLogout,
     LoginPressed,
     RegisterPressed,
     LoginSucceeded {
@@ -84,6 +90,16 @@ pub enum AppMessage {
     EmojiPicked {
         emoji: String,
     },
+    AddFriendInputChanged {
+        text: String,
+    },
+    AddFriendSearchChanged {
+        text: String,
+    },
+    ToggleNewFriendsSection,
+    ToggleGroupSection,
+    ToggleFriendSection,
+    AddFriendRequestPressed,
     ComposerEdited {
         action: text_editor::Action,
     },
@@ -128,6 +144,7 @@ pub enum AppMessage {
         channel_id: u64,
         channel_type: i32,
         at_bottom: bool,
+        near_top: bool,
         first_visible_item: Option<TimelineItemKey>,
     },
 }
