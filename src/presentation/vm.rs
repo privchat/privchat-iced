@@ -1,0 +1,106 @@
+/// UI-only identities (not from SDK)
+pub type ClientTxnId = u64;
+pub type OpenToken = u64;
+pub type TimelineRevision = u64;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UiError {
+    Unknown(String),
+}
+
+impl Default for UiError {
+    fn default() -> Self {
+        Self::Unknown("unknown".to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LoginSessionVm {
+    pub user_id: u64,
+    pub token: String,
+    pub device_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimelineItemKey {
+    Local(ClientTxnId),
+    Remote { server_message_id: u64 },
+}
+
+impl Default for TimelineItemKey {
+    fn default() -> Self {
+        Self::Local(0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageSendStateVm {
+    Queued,
+    Sending,
+    Sent,
+    FailedRetryable { reason: UiError },
+    FailedPermanent { reason: UiError },
+    Retrying,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MessageVm {
+    pub key: TimelineItemKey,
+    pub channel_id: u64,
+    pub channel_type: i32,
+    pub message_id: u64,
+    pub server_message_id: Option<u64>,
+    pub client_txn_id: Option<ClientTxnId>,
+    pub from_uid: u64,
+    pub body: String,
+    pub message_type: i32,
+    pub created_at: i64,
+    pub pts: Option<u64>,
+    pub send_state: Option<MessageSendStateVm>,
+    pub is_own: bool,
+    pub is_deleted: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TimelineSnapshotVm {
+    pub revision: TimelineRevision,
+    pub items: Vec<MessageVm>,
+    pub oldest_server_message_id: Option<u64>,
+    pub has_more_before: bool,
+    pub unread_marker: UnreadMarkerVm,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct HistoryPageVm {
+    pub items: Vec<MessageVm>,
+    pub oldest_server_message_id: Option<u64>,
+    pub has_more_before: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct UnreadMarkerVm {
+    pub first_unread_key: Option<TimelineItemKey>,
+    pub unread_count: u32,
+    pub has_unread_below_viewport: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum TimelinePatchVm {
+    ReplaceLocalEcho {
+        client_txn_id: ClientTxnId,
+        remote: MessageVm,
+    },
+    UpsertRemote {
+        remote: MessageVm,
+    },
+    UpdateSendState {
+        client_txn_id: ClientTxnId,
+        send_state: MessageSendStateVm,
+    },
+    RemoveMessage {
+        key: TimelineItemKey,
+    },
+    UpdateUnreadMarker {
+        unread_marker: UnreadMarkerVm,
+    },
+}
