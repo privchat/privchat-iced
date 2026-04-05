@@ -6,7 +6,7 @@ license = "Apache-2.0"
 authors = ["zoujiaqing <zoujiaqing@gmail.com>"]
 
 [dependencies]
-iced = { version = "0.14", features = ["tokio", "svg"] }
+iced = { version = "0.14", features = ["tokio", "svg", "image"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
