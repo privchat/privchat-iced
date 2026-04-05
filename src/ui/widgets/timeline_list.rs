@@ -35,7 +35,7 @@ pub fn view(
     if !timeline.items.is_empty() {
         for (index, message) in timeline.items.iter().enumerate() {
             if show_timestamp(index) {
-                list = list.push(timestamp_separator(index));
+                list = list.push(timestamp_separator(message.created_at));
             }
             list = list.push(message_bubble::view(message));
         }
@@ -63,15 +63,16 @@ fn show_timestamp(index: usize) -> bool {
     index == 0 || index % 2 == 0
 }
 
-fn timestamp_separator(index: usize) -> Element<'static, AppMessage> {
-    container(
-        text(mock_timestamp(index))
-            .size(12)
-            .color(Color::from_rgb8(0x8D, 0x94, 0x9E)),
-    )
-    .width(Length::Fill)
-    .center_x(Length::Fill)
-    .into()
+fn timestamp_separator(created_at: i64) -> Element<'static, AppMessage> {
+    let (label, color) = match format_message_timestamp(created_at) {
+        Ok(value) => (value, Color::from_rgb8(0x8D, 0x94, 0x9E)),
+        Err(err) => (err.to_string(), Color::from_rgb8(0xD0, 0x6B, 0x6B)),
+    };
+
+    container(text(label).size(12).color(color))
+        .width(Length::Fill)
+        .center_x(Length::Fill)
+        .into()
 }
 
 fn load_older_button_style(_theme: &Theme, status: button::Status) -> button::Style {
@@ -100,15 +101,19 @@ fn timeline_scroll_style(theme: &Theme, status: scrollable::Status) -> scrollabl
     style
 }
 
-fn mock_timestamp(index: usize) -> &'static str {
-    const TIMES: [&str; 7] = [
-        "Thursday 14:56",
-        "Thursday 17:08",
-        "Friday 23:42",
-        "Yesterday 20:34",
-        "Yesterday 21:10",
-        "Yesterday 23:08",
-        "Today 10:12",
-    ];
-    TIMES[index % TIMES.len()]
+fn format_message_timestamp(created_at: i64) -> Result<String, &'static str> {
+    if created_at <= 0 {
+        return Err("TIME_ERR");
+    }
+
+    let seconds = if created_at > 1_000_000_000_000 {
+        created_at / 1000
+    } else {
+        created_at
+    };
+
+    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
+    let hour = normalized / 3_600;
+    let minute = (normalized % 3_600) / 60;
+    Ok(format!("{hour:02}:{minute:02}"))
 }

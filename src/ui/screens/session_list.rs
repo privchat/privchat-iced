@@ -18,6 +18,18 @@ pub fn view(
 ) -> Element<'_, AppMessage> {
     let mut list = column!().spacing(0);
 
+    if let Some(error) = &session_list.load_error {
+        list = list.push(
+            container(
+                text(format!("SESSION_LIST_ERR: {error}"))
+                    .size(12)
+                    .color(Color::from_rgb8(0xD0, 0x6B, 0x6B)),
+            )
+            .width(Length::Fill)
+            .padding([8, 12]),
+        );
+    }
+
     if session_list.items.is_empty() {
         list = list.push(
             container(
@@ -29,11 +41,11 @@ pub fn view(
             .padding([20, 16]),
         );
     } else {
-        for (index, item) in session_list.items.iter().enumerate() {
+        for item in &session_list.items {
             let selected = active_chat.is_some_and(|(channel_id, channel_type)| {
                 channel_id == item.channel_id && channel_type == item.channel_type
             });
-            list = list.push(conversation_item(item, index, selected));
+            list = list.push(conversation_item(item, selected));
         }
     }
 
@@ -87,11 +99,7 @@ fn search_bar() -> Element<'static, AppMessage> {
         .into()
 }
 
-fn conversation_item(
-    item: &SessionListItemState,
-    index: usize,
-    selected: bool,
-) -> Element<'_, AppMessage> {
+fn conversation_item(item: &SessionListItemState, selected: bool) -> Element<'_, AppMessage> {
     let display_title = truncate_nickname(&item.title, 9);
 
     let avatar = container(text(""))
@@ -111,14 +119,9 @@ fn conversation_item(
                     .size(14)
                     .wrapping(iced::widget::text::Wrapping::None)
                     .color(Color::from_rgb8(0xEA, 0xEE, 0xF4)),
-                container(
-                    text(mock_time(index))
-                        .size(12)
-                        .wrapping(iced::widget::text::Wrapping::None)
-                        .color(Color::from_rgb8(0x9A, 0xA1, 0xAB))
-                )
-                .width(Length::Fill)
-                .align_x(alignment::Horizontal::Right),
+                container(session_item_meta(item))
+                    .width(Length::Fill)
+                    .align_x(alignment::Horizontal::Right),
             ],
             text(&item.subtitle)
                 .size(12)
@@ -210,22 +213,58 @@ fn session_scroll_style(theme: &Theme, status: scrollable::Status) -> scrollable
     style
 }
 
-fn mock_time(index: usize) -> &'static str {
-    const TIMES: [&str; 12] = [
-        "05:35",
-        "03:20",
-        "Yesterday 23:50",
-        "Yesterday 21:41",
-        "Yesterday 21:10",
-        "Yesterday 20:46",
-        "Yesterday 16:31",
-        "Yesterday 06:04",
-        "Yesterday 03:44",
-        "Friday",
-        "Thursday",
-        "Monday",
-    ];
-    TIMES[index % TIMES.len()]
+fn session_item_meta(item: &SessionListItemState) -> Element<'static, AppMessage> {
+    let (time_text, time_color) = match format_last_msg_time(item.last_msg_timestamp) {
+        Ok(value) => (value, Color::from_rgb8(0x9A, 0xA1, 0xAB)),
+        Err(err) => (err.to_string(), Color::from_rgb8(0xD0, 0x6B, 0x6B)),
+    };
+
+    let mut right = column![text(time_text)
+        .size(12)
+        .wrapping(iced::widget::text::Wrapping::None)
+        .color(time_color)]
+    .spacing(6)
+    .align_x(alignment::Horizontal::Right);
+
+    if item.unread_count > 0 {
+        right = right.push(unread_badge(item.unread_count));
+    }
+
+    right.into()
+}
+
+fn unread_badge(unread_count: u32) -> Element<'static, AppMessage> {
+    let label = if unread_count > 99 {
+        "99+".to_string()
+    } else {
+        unread_count.to_string()
+    };
+
+    container(text(label).size(10).color(Color::WHITE))
+        .padding([2, 6])
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0xEA, 0x4B, 0x52))),
+            border: border::rounded(10.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn format_last_msg_time(last_msg_timestamp: i64) -> Result<String, &'static str> {
+    if last_msg_timestamp <= 0 {
+        return Err("TIME_ERR");
+    }
+
+    let seconds = if last_msg_timestamp > 1_000_000_000_000 {
+        last_msg_timestamp / 1000
+    } else {
+        last_msg_timestamp
+    };
+
+    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
+    let hour = normalized / 3_600;
+    let minute = (normalized % 3_600) / 60;
+    Ok(format!("{hour:02}:{minute:02}"))
 }
 
 fn truncate_nickname(value: &str, max_chars: usize) -> String {

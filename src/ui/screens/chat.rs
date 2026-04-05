@@ -72,7 +72,9 @@ pub fn view<'a>(chat: &'a ChatScreenState, title: &'a str) -> Element<'a, AppMes
 
     let content: Element<'_, AppMessage> = if chat.composer.emoji_picker_open {
         stack![
-            column![header, body, composer].width(Length::Fill).height(Length::Fill),
+            column![header, body, composer]
+                .width(Length::Fill)
+                .height(Length::Fill),
             mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
                 .on_press(AppMessage::DismissEmojiPicker),
             container(

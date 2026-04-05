@@ -1,8 +1,8 @@
 use iced::widget::text_editor;
 
 use crate::presentation::vm::{
-    ClientTxnId, HistoryPageVm, LoginSessionVm, OpenToken, TimelineItemKey, TimelinePatchVm,
-    TimelineRevision, TimelineSnapshotVm, UiError,
+    ClientTxnId, HistoryPageVm, LoginSessionVm, OpenToken, SessionListItemVm, TimelineItemKey,
+    TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
 };
 
 #[derive(Debug, Clone)]
@@ -11,6 +11,19 @@ pub enum AppMessage {
     StartupRestoreCompleted {
         session: Option<LoginSessionVm>,
     },
+    SessionListLoaded {
+        items: Vec<SessionListItemVm>,
+    },
+    SessionListLoadFailed {
+        error: UiError,
+    },
+    TotalUnreadCountLoaded {
+        count: u32,
+    },
+    TotalUnreadCountLoadFailed {
+        error: UiError,
+    },
+    RefreshTotalUnreadCount,
     LoginUsernameChanged {
         text: String,
     },

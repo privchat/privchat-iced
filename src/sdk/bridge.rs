@@ -7,7 +7,8 @@ use tokio::sync::broadcast::error::RecvError;
 
 use crate::presentation::adapter;
 use crate::presentation::vm::{
-    ClientTxnId, HistoryPageVm, LoginSessionVm, MessageVm, TimelineSnapshotVm, UiError,
+    ClientTxnId, HistoryPageVm, LoginSessionVm, MessageVm, SessionListItemVm, TimelineSnapshotVm,
+    UiError,
 };
 
 fn map_sdk_error(err: privchat_sdk::Error) -> UiError {
@@ -17,6 +18,8 @@ fn map_sdk_error(err: privchat_sdk::Error) -> UiError {
 #[async_trait]
 pub trait SdkBridge: Send + Sync + 'static {
     async fn restore_session(&self) -> Result<Option<LoginSessionVm>, UiError>;
+    async fn load_session_list(&self) -> Result<Vec<SessionListItemVm>, UiError>;
+    async fn load_total_unread_count(&self, exclude_muted: bool) -> Result<u32, UiError>;
 
     async fn login_with_password(
         &self,
@@ -166,6 +169,28 @@ impl SdkBridge for PrivchatSdkBridge {
             token: snapshot.token,
             device_id: snapshot.device_id,
         }))
+    }
+
+    async fn load_session_list(&self) -> Result<Vec<SessionListItemVm>, UiError> {
+        let channels = self
+            .sdk
+            .list_channels(300, 0)
+            .await
+            .map_err(map_sdk_error)?;
+
+        Ok(channels
+            .iter()
+            .map(adapter::map_channel_to_session_item)
+            .collect())
+    }
+
+    async fn load_total_unread_count(&self, exclude_muted: bool) -> Result<u32, UiError> {
+        let unread = self
+            .sdk
+            .get_total_unread_count(exclude_muted)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(unread.max(0) as u32)
     }
 
     async fn login_with_password(

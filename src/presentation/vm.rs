@@ -21,6 +21,16 @@ pub struct LoginSessionVm {
     pub device_id: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SessionListItemVm {
+    pub channel_id: u64,
+    pub channel_type: i32,
+    pub title: String,
+    pub subtitle: String,
+    pub unread_count: u32,
+    pub last_msg_timestamp: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TimelineItemKey {
     Local(ClientTxnId),

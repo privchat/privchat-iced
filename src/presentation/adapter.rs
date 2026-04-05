@@ -1,8 +1,8 @@
 use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 
 use crate::presentation::vm::{
-    ClientTxnId, HistoryPageVm, MessageSendStateVm, MessageVm, TimelineItemKey, TimelineRevision,
-    TimelineSnapshotVm, UiError, UnreadMarkerVm,
+    ClientTxnId, HistoryPageVm, MessageSendStateVm, MessageVm, SessionListItemVm, TimelineItemKey,
+    TimelineRevision, TimelineSnapshotVm, UiError, UnreadMarkerVm,
 };
 
 fn extract_body(content: &str) -> String {
@@ -39,6 +39,27 @@ fn extract_pts(extra: &str) -> Option<u64> {
         .get("pts")
         .and_then(|v| v.as_u64())
         .or_else(|| parsed.get("version").and_then(|v| v.as_u64()))
+}
+
+fn channel_display_title(channel: &StoredChannel) -> String {
+    if !channel.channel_remark.trim().is_empty() {
+        return channel.channel_remark.trim().to_string();
+    }
+    if !channel.channel_name.trim().is_empty() {
+        return channel.channel_name.trim().to_string();
+    }
+    format!("Channel {}", channel.channel_id)
+}
+
+pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm {
+    SessionListItemVm {
+        channel_id: channel.channel_id,
+        channel_type: channel.channel_type,
+        title: channel_display_title(channel),
+        subtitle: extract_body(&channel.last_msg_content),
+        unread_count: channel.unread_count.max(0) as u32,
+        last_msg_timestamp: channel.last_msg_timestamp,
+    }
 }
 
 pub fn map_send_status(status: i32, is_own: bool) -> Option<MessageSendStateVm> {

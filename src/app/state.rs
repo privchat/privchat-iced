@@ -5,7 +5,8 @@ use iced::widget::text_editor;
 use crate::app::auth_prefs;
 use crate::app::route::Route;
 use crate::presentation::vm::{
-    ClientTxnId, MessageVm, OpenToken, TimelineItemKey, TimelineRevision, UnreadMarkerVm,
+    ClientTxnId, MessageVm, OpenToken, SessionListItemVm, TimelineItemKey, TimelineRevision,
+    UnreadMarkerVm,
 };
 
 fn default_device_id() -> String {
@@ -44,84 +45,21 @@ impl Default for AuthState {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SessionListItemState {
-    pub channel_id: u64,
-    pub channel_type: i32,
-    pub title: String,
-    pub subtitle: String,
-}
+pub type SessionListItemState = SessionListItemVm;
 
 #[derive(Debug)]
 pub struct SessionListState {
     pub items: Vec<SessionListItemState>,
+    pub load_error: Option<String>,
+    pub total_unread_count: u32,
 }
 
 impl Default for SessionListState {
     fn default() -> Self {
         Self {
-            items: vec![
-                SessionListItemState {
-                    channel_id: 100,
-                    channel_type: 2,
-                    title: "Home（自家人）".to_string(),
-                    subtitle: "[Channel] JAMES街坊's Activity".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 101,
-                    channel_type: 2,
-                    title: "李欣慈".to_string(),
-                    subtitle: "我都睡了一觉醒了".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 102,
-                    channel_type: 2,
-                    title: "Jolin.刘阿峰".to_string(),
-                    subtitle: "👍".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 103,
-                    channel_type: 2,
-                    title: "刘若依 山东".to_string(),
-                    subtitle: "Voice Call".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 104,
-                    channel_type: 2,
-                    title: "游哥".to_string(),
-                    subtitle: "Video Call".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 105,
-                    channel_type: 2,
-                    title: "威廉".to_string(),
-                    subtitle: "恩恩".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 106,
-                    channel_type: 2,
-                    title: "玫瑰 海防 胡志明".to_string(),
-                    subtitle: "你最近没时间回胡志明吧？".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 107,
-                    channel_type: 2,
-                    title: "Jenny 珍妮".to_string(),
-                    subtitle: "Voice Call".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 108,
-                    channel_type: 2,
-                    title: "乘骑 海南陵水县 法师".to_string(),
-                    subtitle: "好".to_string(),
-                },
-                SessionListItemState {
-                    channel_id: 109,
-                    channel_type: 2,
-                    title: "溪烈 深圳 法师".to_string(),
-                    subtitle: "[Channel] 可乐动物园长's Activity".to_string(),
-                },
-            ],
+            items: Vec::new(),
+            load_error: None,
+            total_unread_count: 0,
         }
     }
 }

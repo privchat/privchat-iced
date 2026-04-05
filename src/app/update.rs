@@ -40,12 +40,40 @@ pub fn update(
         AppMessage::StartupRestoreCompleted { session } => {
             if let Some(session) = session {
                 apply_login_success(state, session.user_id, session.token, session.device_id);
+                return Task::batch([
+                    schedule_session_list_refresh(bridge),
+                    schedule_total_unread_refresh(bridge),
+                ]);
             } else {
                 state.route = Route::Login;
                 state.auth.is_submitting = false;
             }
             Task::none()
         }
+
+        AppMessage::SessionListLoaded { items } => {
+            state.session_list.items = items;
+            state.session_list.load_error = None;
+            schedule_total_unread_refresh(bridge)
+        }
+
+        AppMessage::SessionListLoadFailed { error } => {
+            state.session_list.load_error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::TotalUnreadCountLoaded { count } => {
+            state.session_list.total_unread_count = count;
+            Task::none()
+        }
+
+        AppMessage::TotalUnreadCountLoadFailed { error } => {
+            state.session_list.load_error =
+                Some(format!("UNREAD_COUNT_ERR: {}", format_ui_error(&error)));
+            Task::none()
+        }
+
+        AppMessage::RefreshTotalUnreadCount => schedule_total_unread_refresh(bridge),
 
         AppMessage::LoginUsernameChanged { text } => {
             state.auth.username = text;
@@ -128,7 +156,10 @@ pub fn update(
             device_id,
         } => {
             apply_login_success(state, user_id, token, device_id);
-            Task::none()
+            Task::batch([
+                schedule_session_list_refresh(bridge),
+                schedule_total_unread_refresh(bridge),
+            ])
         }
 
         AppMessage::LoginFailed { error } => {
@@ -255,11 +286,21 @@ pub fn update(
             if !pass_revision_gate(state, revision) {
                 return Task::none();
             }
+            let should_refresh_unread = matches!(
+                &patch,
+                TimelinePatchVm::ReplaceLocalEcho { .. }
+                    | TimelinePatchVm::UpsertRemote { .. }
+                    | TimelinePatchVm::RemoveMessage { .. }
+                    | TimelinePatchVm::UpdateUnreadMarker { .. }
+            );
             if let Some(chat) = &mut state.active_chat {
                 let applied = apply_timeline_patch(chat, patch);
                 if applied {
                     chat.timeline.revision = revision;
                     chat.runtime_index.rebuild_from_items(&chat.timeline.items);
+                    if should_refresh_unread {
+                        return schedule_total_unread_refresh(bridge);
+                    }
                 }
             }
             Task::none()
@@ -374,6 +415,28 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     state.auth.device_id = device_id;
     state.auth.password.clear();
     state.route = Route::SessionList;
+}
+
+fn schedule_session_list_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.load_session_list().await },
+        |result| match result {
+            Ok(items) => AppMessage::SessionListLoaded { items },
+            Err(error) => AppMessage::SessionListLoadFailed { error },
+        },
+    )
+}
+
+fn schedule_total_unread_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.load_total_unread_count(false).await },
+        |result| match result {
+            Ok(count) => AppMessage::TotalUnreadCountLoaded { count },
+            Err(error) => AppMessage::TotalUnreadCountLoadFailed { error },
+        },
+    )
 }
 
 fn handle_login_submit(
@@ -653,7 +716,10 @@ fn handle_viewport_changed(
                 .mark_read(channel_id, channel_type, last_read_pts)
                 .await
         },
-        |_| AppMessage::Noop,
+        |result| match result {
+            Ok(()) => AppMessage::RefreshTotalUnreadCount,
+            Err(_) => AppMessage::Noop,
+        },
     )
 }
 
@@ -924,6 +990,16 @@ mod tests {
             &self,
         ) -> Result<Option<crate::presentation::vm::LoginSessionVm>, UiError> {
             Ok(None)
+        }
+
+        async fn load_session_list(
+            &self,
+        ) -> Result<Vec<crate::presentation::vm::SessionListItemVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_total_unread_count(&self, _exclude_muted: bool) -> Result<u32, UiError> {
+            Ok(0)
         }
 
         async fn login_with_password(

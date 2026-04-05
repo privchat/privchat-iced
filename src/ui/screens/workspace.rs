@@ -35,7 +35,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     let detail: Element<'_, AppMessage> = match state.route {
         Route::Chat => {
             if let Some(chat_state) = &state.active_chat {
-                chat::view(chat_state, active_title.unwrap_or("会话"))
+                chat::view(chat_state, active_title.unwrap_or("TITLE_ERR"))
             } else {
                 empty_detail("请选择一个会话")
             }
@@ -69,9 +69,12 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
 }
 
 fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
+    let message_badge_count = (state.session_list.total_unread_count > 0)
+        .then_some(state.session_list.total_unread_count);
+
     let top = column![
         avatar_chip(state.auth.user_id),
-        nav_icon(Icon::Message, true, Some(2)),
+        nav_icon(Icon::Message, true, message_badge_count),
         nav_icon(Icon::Contact, false, None),
         nav_icon(Icon::Box, false, None),
         nav_icon(Icon::Compass, false, None),
@@ -140,8 +143,13 @@ fn nav_icon(icon: Icon, active: bool, badge_count: Option<u32>) -> Element<'stat
         });
 
     if let Some(count) = badge_count {
+        let label = if count > 99 {
+            "99+".to_string()
+        } else {
+            count.to_string()
+        };
         let badge = container(
-            text(count.to_string())
+            text(label)
                 .size(10)
                 .color(Color::from_rgb8(0xFF, 0xFF, 0xFF)),
         )

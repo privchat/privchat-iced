@@ -46,7 +46,56 @@ fn map_send_status(status: i32) -> MessageSendStateVm {
 }
 
 pub fn map_sdk_event_with_context((context, event): (EventMapContext, SdkEvent)) -> AppMessage {
-    map_sdk_event_to_app_message(event, &context).unwrap_or(AppMessage::Noop)
+    map_sdk_event(event, Some(&context))
+}
+
+/// Map SDK events into app messages with optional active-chat context.
+/// - Active chat timeline updates are routed to timeline ingress.
+/// - Other timeline updates trigger unread-count refresh.
+pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppMessage {
+    match event {
+        SdkEvent::TimelineUpdated {
+            channel_id,
+            channel_type,
+            message_id,
+            reason: _,
+        } => {
+            if let Some(context) = context {
+                if channel_id == context.channel_id && channel_type == context.channel_type {
+                    return AppMessage::TimelineUpdatedIngress {
+                        channel_id,
+                        channel_type,
+                        open_token: context.open_token,
+                        message_id,
+                    };
+                }
+            }
+            AppMessage::RefreshTotalUnreadCount
+        }
+        SdkEvent::MessageSendStatusChanged {
+            message_id,
+            status,
+            server_message_id: _,
+        } => {
+            let Some(context) = context else {
+                return AppMessage::Noop;
+            };
+            context
+                .client_txn_id_for_message(message_id)
+                .map(|client_txn_id| AppMessage::TimelinePatched {
+                    channel_id: context.channel_id,
+                    channel_type: context.channel_type,
+                    open_token: context.open_token,
+                    revision: allocate_patch_revision(),
+                    patch: TimelinePatchVm::UpdateSendState {
+                        client_txn_id,
+                        send_state: map_send_status(status),
+                    },
+                })
+                .unwrap_or(AppMessage::Noop)
+        }
+        _ => AppMessage::Noop,
+    }
 }
 
 /// SDK event ingress mapping.

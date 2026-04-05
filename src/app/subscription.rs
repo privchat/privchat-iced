@@ -38,12 +38,10 @@ fn map_global_event(
         iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
             Some(AppMessage::GlobalCursorMoved { x: position.x })
         }
-        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-            match status {
-                event::Status::Ignored => Some(AppMessage::GlobalLeftMousePressed),
-                event::Status::Captured => None,
-            }
-        }
+        iced::Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => match status {
+            event::Status::Ignored => Some(AppMessage::GlobalLeftMousePressed),
+            event::Status::Captured => None,
+        },
         iced::Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
             Some(AppMessage::SessionSplitterDragEnded)
         }
@@ -70,15 +68,12 @@ fn map_global_event(
 /// Build subscriptions for SDK event streams.
 pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscription<AppMessage> {
     let mut subscriptions = vec![event::listen_with(map_global_event)];
-
-    if let Some(context) = map_context_from_state(state) {
-        subscriptions.push(
-            bridge
-                .subscribe_timeline()
-                .with(context)
-                .map(events::map_sdk_event_with_context),
-        );
-    }
+    let context = map_context_from_state(state);
+    subscriptions.push(
+        bridge
+            .subscribe_timeline()
+            .map(move |event| events::map_sdk_event(event, context.as_ref())),
+    );
 
     Subscription::batch(subscriptions)
 }
