@@ -29,7 +29,13 @@ fn boot() -> (PrivchatApp, Task<AppMessage>) {
     let restore_task = Task::perform(
         async move {
             let start = Instant::now();
-            let session = restore_bridge.restore_session().await.ok().flatten();
+            let session = match restore_bridge.restore_session().await {
+                Ok(session) => session,
+                Err(error) => {
+                    tracing::error!("startup restore_session failed: {:?}", error);
+                    None
+                }
+            };
             let elapsed = start.elapsed();
             let min_splash = Duration::from_millis(600);
             if elapsed < min_splash {

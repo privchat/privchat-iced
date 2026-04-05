@@ -145,11 +145,18 @@ impl PrivchatSdkBridge {
 #[async_trait]
 impl SdkBridge for PrivchatSdkBridge {
     async fn restore_session(&self) -> Result<Option<LoginSessionVm>, UiError> {
+        tracing::info!("restore_session: connect");
         self.sdk.connect().await.map_err(map_sdk_error)?;
 
         let Some(snapshot) = self.sdk.session_snapshot().await.map_err(map_sdk_error)? else {
+            tracing::info!("restore_session: no local session snapshot");
             return Ok(None);
         };
+        tracing::info!(
+            "restore_session: snapshot found user_id={} device_id={}",
+            snapshot.user_id,
+            snapshot.device_id
+        );
 
         if self
             .sdk
@@ -161,8 +168,12 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .is_err()
         {
+            tracing::warn!("restore_session: authenticate failed, fallback to login screen");
             return Ok(None);
         }
+        tracing::info!("restore_session: authenticate ok, run bootstrap sync");
+        self.sdk.run_bootstrap_sync().await.map_err(map_sdk_error)?;
+        tracing::info!("restore_session: bootstrap sync completed");
 
         Ok(Some(LoginSessionVm {
             user_id: snapshot.user_id,
@@ -177,6 +188,12 @@ impl SdkBridge for PrivchatSdkBridge {
             .list_channels(300, 0)
             .await
             .map_err(map_sdk_error)?;
+        let bootstrap_completed = self.sdk.is_bootstrap_completed().await.unwrap_or(false);
+        tracing::info!(
+            "load_session_list: channels={} bootstrap_completed={}",
+            channels.len(),
+            bootstrap_completed
+        );
 
         Ok(channels
             .iter()
@@ -222,6 +239,12 @@ impl SdkBridge for PrivchatSdkBridge {
             )
             .await
             .map_err(map_sdk_error)?;
+        tracing::info!(
+            "login_with_password: authenticate ok user_id={}, run bootstrap sync",
+            result.user_id
+        );
+        self.sdk.run_bootstrap_sync().await.map_err(map_sdk_error)?;
+        tracing::info!("login_with_password: bootstrap sync completed");
 
         Ok(LoginSessionVm {
             user_id: result.user_id,

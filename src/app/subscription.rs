@@ -68,12 +68,20 @@ fn map_global_event(
 /// Build subscriptions for SDK event streams.
 pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscription<AppMessage> {
     let mut subscriptions = vec![event::listen_with(map_global_event)];
-    let context = map_context_from_state(state);
-    subscriptions.push(
-        bridge
-            .subscribe_timeline()
-            .map(move |event| events::map_sdk_event(event, context.as_ref())),
-    );
+    if let Some(context) = map_context_from_state(state) {
+        subscriptions.push(
+            bridge
+                .subscribe_timeline()
+                .with(context)
+                .map(events::map_sdk_event_with_context),
+        );
+    } else {
+        subscriptions.push(
+            bridge
+                .subscribe_timeline()
+                .map(events::map_sdk_event_without_context),
+        );
+    }
 
     Subscription::batch(subscriptions)
 }

@@ -73,6 +73,8 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::RefreshSessionList => schedule_session_list_refresh(bridge),
+
         AppMessage::RefreshTotalUnreadCount => schedule_total_unread_refresh(bridge),
 
         AppMessage::LoginUsernameChanged { text } => {

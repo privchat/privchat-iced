@@ -49,11 +49,32 @@ pub fn map_sdk_event_with_context((context, event): (EventMapContext, SdkEvent))
     map_sdk_event(event, Some(&context))
 }
 
+pub fn map_sdk_event_without_context(event: SdkEvent) -> AppMessage {
+    map_sdk_event(event, None)
+}
+
 /// Map SDK events into app messages with optional active-chat context.
 /// - Active chat timeline updates are routed to timeline ingress.
 /// - Other timeline updates trigger unread-count refresh.
 pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppMessage {
     match event {
+        SdkEvent::BootstrapCompleted { .. }
+        | SdkEvent::SyncAllChannelsApplied { .. }
+        | SdkEvent::SyncChannelApplied { .. } => AppMessage::RefreshSessionList,
+        SdkEvent::SyncEntitiesApplied { entity_type, .. } => {
+            if entity_type == "channel" || entity_type == "channel_read_cursor" {
+                AppMessage::RefreshSessionList
+            } else {
+                AppMessage::Noop
+            }
+        }
+        SdkEvent::SyncEntityChanged { entity_type, .. } => {
+            if entity_type == "channel" || entity_type == "channel_read_cursor" {
+                AppMessage::RefreshSessionList
+            } else {
+                AppMessage::Noop
+            }
+        }
         SdkEvent::TimelineUpdated {
             channel_id,
             channel_type,

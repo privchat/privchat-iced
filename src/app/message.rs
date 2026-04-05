@@ -23,6 +23,7 @@ pub enum AppMessage {
     TotalUnreadCountLoadFailed {
         error: UiError,
     },
+    RefreshSessionList,
     RefreshTotalUnreadCount,
     LoginUsernameChanged {
         text: String,
