@@ -16,3 +16,9 @@ serde_json = "1"
 uuid = { version = "1", features = ["v4"] }
 privchat-sdk = { path = "../privchat-sdk/crates/privchat-sdk" }
 privchat-protocol = { path = "../privchat-protocol" }
+
+[package.metadata.bundle]
+name = "PrivChat"
+identifier = "com.netonstream.privchat-desktop"
+icon = ["assets/icon.icns"]
+
