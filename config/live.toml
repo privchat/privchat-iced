@@ -1,0 +1,13 @@
+[application]
+name = "PrivChat 直播版"
+
+[network]
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+prefer_transport = "tcp"
+fallback_transport = "tcp"
+
+[[servers]]
+protocol = "tcp"
+url = "tcp://149.30.239.183:9001"
+priority = 100

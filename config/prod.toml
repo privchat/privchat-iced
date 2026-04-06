@@ -1,0 +1,18 @@
+[application]
+name = "PrivChat"
+
+[network]
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+prefer_transport = "quic"
+fallback_transport = "tcp"
+
+[[servers]]
+protocol = "quic"
+url = "quic://149.30.239.183:9001"
+priority = 100
+
+[[servers]]
+protocol = "tcp"
+url = "tcp://149.30.239.183:9001"
+priority = 90

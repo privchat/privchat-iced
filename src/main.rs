@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod presentation;
 mod sdk;
 mod ui;
@@ -11,6 +12,7 @@ use iced::{window, Element, Font, Size, Subscription, Task};
 use app::message::AppMessage;
 use app::route::Route;
 use app::state::AppState;
+use config::AppConfig;
 use sdk::bridge::{PrivchatSdkBridge, SdkBridge};
 
 /// Root application state. Holds presentation state + sdk bridge.
@@ -19,8 +21,8 @@ struct PrivchatApp {
     bridge: Arc<dyn SdkBridge>,
 }
 
-fn boot() -> (PrivchatApp, Task<AppMessage>) {
-    let bridge: Arc<dyn SdkBridge> = Arc::new(PrivchatSdkBridge::new());
+fn boot(config: AppConfig) -> (PrivchatApp, Task<AppMessage>) {
+    let bridge: Arc<dyn SdkBridge> = Arc::new(PrivchatSdkBridge::new(config));
     let restore_bridge = Arc::clone(&bridge);
     let mut app = PrivchatApp {
         state: AppState::new(),
@@ -131,13 +133,27 @@ fn main_window_settings() -> window::Settings {
     }
 }
 
-fn main() -> iced::Result {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     app::reporting::install_report_sink(Arc::new(app::reporting::TracingReportSink));
 
-    iced::daemon(boot, update, view)
-        .title(window_title)
-        .default_font(Font::with_name("Microsoft YaHei"))
-        .subscription(subscription)
-        .run()
+    let (profile, config) = config::load_app_config()?;
+
+    tracing::info!(
+        profile = %profile,
+        app_name = %config.application.name,
+        "config loaded"
+    );
+
+    iced::daemon(
+        move || boot(config.clone()),
+        update,
+        view,
+    )
+    .title(window_title)
+    .default_font(Font::with_name("Microsoft YaHei"))
+    .subscription(subscription)
+    .run()?;
+
+    Ok(())
 }

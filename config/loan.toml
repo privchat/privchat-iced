@@ -1,0 +1,13 @@
+[application]
+name = "PrivChat云端金融"
+
+[network]
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+prefer_transport = "tcp"
+fallback_transport = "tcp"
+
+[[servers]]
+protocol = "tcp"
+url = "tcp://8.210.184.78:9001"
+priority = 100

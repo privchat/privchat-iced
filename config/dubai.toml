@@ -1,0 +1,13 @@
+[application]
+name = "PrivChat 迪拜版"
+
+[network]
+connect_timeout_ms = 5000
+request_timeout_ms = 10000
+prefer_transport = "tcp"
+fallback_transport = "tcp"
+
+[[servers]]
+protocol = "tcp"
+url = "tcp://47.243.26.150:10001"
+priority = 100

@@ -16,6 +16,7 @@ use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredFrie
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::app::reporting::{self, MarkReadPtsSource};
+use crate::config::AppConfig;
 use crate::presentation::adapter;
 use crate::presentation::vm::{
     AddFriendDetailFieldVm, AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm,
@@ -189,30 +190,20 @@ fn sdk_event_stream(seed: &EventSubscriptionSeed) -> impl iced::futures::Stream<
 }
 
 impl PrivchatSdkBridge {
-    pub fn new() -> Self {
-        let server_urls = std::env::var("PRIVCHAT_SERVER_URL")
-            .ok()
-            .map(|raw| {
-                raw.split(',')
-                    .map(str::trim)
-                    .filter(|url| !url.is_empty())
-                    .map(ToOwned::to_owned)
-                    .collect::<Vec<_>>()
-            })
-            .filter(|urls| !urls.is_empty())
-            .unwrap_or_else(|| vec!["quic://127.0.0.1:9001".to_string()]);
+    pub fn new(config: AppConfig) -> Self {
+        let server_urls: Vec<_> = config.servers.iter().map(|s| s.url.clone()).collect();
 
-        let mut config = PrivchatConfig::from_server_urls(server_urls.clone(), 10);
+        let mut sdk_config = PrivchatConfig::from_server_urls(server_urls.clone(), 10);
         if let Some(data_dir) = std::env::var("PRIVCHAT_DATA_DIR")
             .ok()
             .filter(|value| !value.is_empty())
         {
-            config.data_dir = data_dir;
+            sdk_config.data_dir = data_dir;
         }
         tracing::info!("privchat sdk endpoints: {:?}", server_urls);
 
         Self {
-            sdk: PrivchatSdk::new(config),
+            sdk: PrivchatSdk::new(sdk_config),
         }
     }
 
