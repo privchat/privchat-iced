@@ -75,14 +75,14 @@ pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscripti
     if let Some(context) = map_context_from_state(state) {
         subscriptions.push(
             bridge
-                .subscribe_timeline()
+                .subscribe_timeline(state.session_epoch)
                 .with(context)
                 .map(events::map_sdk_event_with_context),
         );
     } else {
         subscriptions.push(
             bridge
-                .subscribe_timeline()
+                .subscribe_timeline(state.session_epoch)
                 .map(events::map_sdk_event_without_context),
         );
     }

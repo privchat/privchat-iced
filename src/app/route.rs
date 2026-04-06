@@ -3,6 +3,7 @@
 pub enum Route {
     Splash,
     Login,
+    SwitchAccount,
     SessionList,
     Chat,
     AddFriend,

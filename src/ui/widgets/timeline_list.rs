@@ -35,15 +35,15 @@ pub fn view(
                 relative_y = 0.0;
             }
 
-            let at_bottom = relative_y <= 0.02;
-            let near_top = relative_y >= 0.98;
+            // anchor_bottom() does not invert relative_offset: 0.0=top, 1.0=bottom.
+            let at_bottom = relative_y >= 0.98;
+            let near_top = relative_y <= 0.02;
 
             AppMessage::ViewportChanged {
                 channel_id,
                 channel_type,
                 at_bottom,
                 near_top,
-                first_visible_item: None,
             }
         })
         .style(timeline_scroll_style)

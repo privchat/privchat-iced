@@ -34,11 +34,11 @@ fn extract_body(content: &str) -> String {
 }
 
 fn extract_pts(extra: &str) -> Option<u64> {
+    // Only recognise the canonical "pts" field.
+    // Do NOT fall back to "version" — semantics unconfirmed; a wrong pts would
+    // silently pollute mark_read progression.
     let parsed = serde_json::from_str::<serde_json::Value>(extra).ok()?;
-    parsed
-        .get("pts")
-        .and_then(|v| v.as_u64())
-        .or_else(|| parsed.get("version").and_then(|v| v.as_u64()))
+    parsed.get("pts").and_then(|v| v.as_u64())
 }
 
 fn channel_display_title(channel: &StoredChannel) -> String {

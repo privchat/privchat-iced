@@ -7,7 +7,7 @@ use crate::app::auth_prefs;
 use crate::app::route::Route;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
-    GroupListItemVm, MessageVm, OpenToken, SearchUserVm, SessionListItemVm, TimelineItemKey,
+    GroupListItemVm, LocalAccountVm, MessageVm, OpenToken, SearchUserVm, SessionListItemVm,
     TimelineRevision, UnreadMarkerVm,
 };
 
@@ -54,6 +54,11 @@ pub struct SessionListState {
     pub items: Vec<SessionListItemState>,
     pub load_error: Option<String>,
     pub total_unread_count: u32,
+    /// Set to true when a RefreshSessionList is requested but a load is already in-flight.
+    /// Prevents N concurrent list_session loads during a sync burst.
+    pub refresh_pending: bool,
+    /// True while an async load_session_list call is in-flight.
+    pub is_loading: bool,
 }
 
 impl Default for SessionListState {
@@ -62,6 +67,8 @@ impl Default for SessionListState {
             items: Vec::new(),
             load_error: None,
             total_unread_count: 0,
+            refresh_pending: false,
+            is_loading: false,
         }
     }
 }
@@ -121,6 +128,29 @@ pub struct OverlayState {
     pub settings_menu_open: bool,
 }
 
+#[derive(Debug)]
+pub struct SwitchAccountState {
+    pub loading: bool,
+    pub switching_uid: Option<String>,
+    pub accounts: Vec<LocalAccountVm>,
+    pub error: Option<String>,
+    pub return_route: Route,
+    pub add_account_login_mode: bool,
+}
+
+impl Default for SwitchAccountState {
+    fn default() -> Self {
+        Self {
+            loading: false,
+            switching_uid: None,
+            accounts: Vec::new(),
+            error: None,
+            return_route: Route::SessionList,
+            add_account_login_mode: false,
+        }
+    }
+}
+
 pub struct ComposerState {
     pub draft: String,
     pub sending_disabled: bool,
@@ -156,7 +186,6 @@ pub struct TimelineState {
     pub oldest_server_message_id: Option<u64>,
     pub has_more_before: bool,
     pub is_loading_more: bool,
-    pub first_visible_item: Option<TimelineItemKey>,
     pub at_bottom: bool,
 }
 
@@ -207,6 +236,7 @@ impl RuntimeMessageIndex {
 pub struct ChatScreenState {
     pub channel_id: u64,
     pub channel_type: i32,
+    pub title: String,
     pub open_token: OpenToken,
     pub timeline: TimelineState,
     pub runtime_index: RuntimeMessageIndex,
@@ -226,8 +256,11 @@ pub struct AppState {
     pub add_friend: AddFriendState,
     pub settings: SettingsState,
     pub overlay: OverlayState,
+    pub switch_account: SwitchAccountState,
+    /// Monotonic counter bumped on every account switch / login / restore.
+    /// Included in the SDK event subscription hash so Iced recreates the stream.
+    pub session_epoch: u64,
     next_open_token: OpenToken,
-    next_client_txn_id: ClientTxnId,
 }
 
 #[derive(Debug)]
@@ -262,8 +295,9 @@ impl AppState {
             add_friend: AddFriendState::default(),
             settings: SettingsState,
             overlay: OverlayState::default(),
+            switch_account: SwitchAccountState::default(),
+            session_epoch: 0,
             next_open_token: 1,
-            next_client_txn_id: 1,
         }
     }
 
@@ -273,11 +307,6 @@ impl AppState {
         token
     }
 
-    pub fn allocate_client_txn_id(&mut self) -> ClientTxnId {
-        let id = self.next_client_txn_id;
-        self.next_client_txn_id = self.next_client_txn_id.saturating_add(1);
-        id
-    }
 }
 
 impl Default for AppState {

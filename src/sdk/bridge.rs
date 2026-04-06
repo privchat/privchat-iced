@@ -1,23 +1,26 @@
 use std::collections::HashSet;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use iced::futures::SinkExt;
 use iced::stream;
 use iced::Subscription;
-use privchat_protocol::message::ContentMessageType;
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
     AccountUserDetailResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
-    FriendPendingResponse,
+    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse,
+    GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
+    MessageStatusReadPtsResponse,
 };
 use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredFriend, StoredUser};
 use tokio::sync::broadcast::error::RecvError;
 
+use crate::app::reporting::{self, MarkReadPtsSource};
 use crate::presentation::adapter;
 use crate::presentation::vm::{
     AddFriendDetailFieldVm, AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm,
-    FriendRequestItemVm, GroupListItemVm, HistoryPageVm, LoginSessionVm, MessageVm, SearchUserVm,
-    SessionListItemVm, TimelineSnapshotVm, UiError,
+    FriendRequestItemVm, GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, MessageVm,
+    SearchUserVm, SessionListItemVm, TimelineSnapshotVm, UiError,
 };
 
 fn map_sdk_error(err: privchat_sdk::Error) -> UiError {
@@ -50,6 +53,8 @@ fn field(label: &str, value: impl Into<String>) -> AddFriendDetailFieldVm {
     }
 }
 
+const TEXT_MESSAGE_TYPE: i32 = 0;
+
 #[async_trait]
 pub trait SdkBridge: Send + Sync + 'static {
     fn generate_local_message_id(&self) -> Result<ClientTxnId, UiError>;
@@ -57,6 +62,9 @@ pub trait SdkBridge: Send + Sync + 'static {
     async fn restore_session(&self) -> Result<Option<LoginSessionVm>, UiError>;
     async fn load_session_list(&self) -> Result<Vec<SessionListItemVm>, UiError>;
     async fn load_total_unread_count(&self, exclude_muted: bool) -> Result<u32, UiError>;
+    async fn sync_channel(&self, channel_id: u64, channel_type: i32) -> Result<usize, UiError>;
+    async fn list_local_accounts(&self) -> Result<Vec<LocalAccountVm>, UiError>;
+    async fn switch_to_local_account(&self, uid: String) -> Result<LoginSessionVm, UiError>;
     async fn logout(&self) -> Result<(), UiError>;
     async fn search_users(&self, query: String) -> Result<Vec<SearchUserVm>, UiError>;
     async fn send_friend_request(
@@ -72,6 +80,10 @@ pub trait SdkBridge: Send + Sync + 'static {
         &self,
         item: AddFriendSelectionVm,
     ) -> Result<AddFriendDetailVm, UiError>;
+    async fn get_or_create_direct_channel(
+        &self,
+        target_user_id: u64,
+    ) -> Result<(u64, i32), UiError>;
 
     async fn login_with_password(
         &self,
@@ -119,7 +131,7 @@ pub trait SdkBridge: Send + Sync + 'static {
         last_read_pts: u64,
     ) -> Result<(), UiError>;
 
-    fn subscribe_timeline(&self) -> Subscription<SdkEvent>;
+    fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent>;
 }
 
 #[derive(Clone)]
@@ -130,29 +142,45 @@ pub struct PrivchatSdkBridge {
 #[derive(Clone)]
 struct EventSubscriptionSeed {
     sdk: PrivchatSdk,
+    /// Included in the hash so that Iced tears down and recreates the event
+    /// stream subscription whenever the active user changes. Without this,
+    /// a stale broadcast::Receiver from the previous user's session would
+    /// keep running after account switch, causing events to be lost.
+    session_epoch: u64,
 }
 
 impl std::hash::Hash for EventSubscriptionSeed {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         std::hash::Hash::hash(&"privchat_sdk_event_stream", state);
+        std::hash::Hash::hash(&self.session_epoch, state);
     }
 }
 
 fn sdk_event_stream(seed: &EventSubscriptionSeed) -> impl iced::futures::Stream<Item = SdkEvent> {
     let sdk = seed.sdk.clone();
+    let session_epoch = seed.session_epoch;
     stream::channel(256, async move |mut output| {
+        tracing::info!("sdk event stream start: session_epoch={session_epoch}");
         let mut receiver = sdk.subscribe_events();
         loop {
             match receiver.recv().await {
                 Ok(event) => {
                     if output.send(event).await.is_err() {
+                        tracing::info!(
+                            "sdk event stream stop(output closed): session_epoch={session_epoch}"
+                        );
                         break;
                     }
                 }
                 Err(RecvError::Lagged(skipped)) => {
-                    tracing::warn!("sdk event stream lagged, skipped={skipped}");
+                    tracing::warn!(
+                        "sdk event stream lagged: session_epoch={} skipped={}",
+                        session_epoch,
+                        skipped
+                    );
                 }
                 Err(RecvError::Closed) => {
+                    tracing::info!("sdk event stream stop(closed): session_epoch={session_epoch}");
                     break;
                 }
             }
@@ -250,7 +278,7 @@ impl PrivchatSdkBridge {
         );
         let subtitle = username
             .clone()
-            .map(|value| format!("Weixin ID: {value}"))
+            .map(|value| format!("PrivChat ID: {value}"))
             .unwrap_or_else(|| format!("UID: {user_id}"));
 
         let mut fields = vec![field("用户 ID", user_id.to_string())];
@@ -335,6 +363,20 @@ impl PrivchatSdkBridge {
             is_added,
         }
     }
+
+    async fn run_post_auth_sync(&self, scene: &str) -> Result<(), UiError> {
+        tracing::info!("{scene}: run bootstrap sync");
+        self.sdk.run_bootstrap_sync().await.map_err(map_sdk_error)?;
+        tracing::info!("{scene}: bootstrap sync completed");
+
+        // Reliability-first policy:
+        // account came online from an offline window, so pull full channel diffs once
+        // to avoid missing offline messages on channel-scoped resume gaps.
+        let applied = self.sdk.sync_all_channels().await.map_err(map_sdk_error)?;
+        tracing::info!("{scene}: sync_all_channels completed applied={applied}");
+
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -370,9 +412,8 @@ impl SdkBridge for PrivchatSdkBridge {
             tracing::warn!("restore_session: authenticate failed, fallback to login screen");
             return Ok(None);
         }
-        tracing::info!("restore_session: authenticate ok, run bootstrap sync");
-        self.sdk.run_bootstrap_sync().await.map_err(map_sdk_error)?;
-        tracing::info!("restore_session: bootstrap sync completed");
+        tracing::info!("restore_session: authenticate ok");
+        self.run_post_auth_sync("restore_session").await?;
 
         Ok(Some(LoginSessionVm {
             user_id: snapshot.user_id,
@@ -388,10 +429,21 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
         let bootstrap_completed = self.sdk.is_bootstrap_completed().await.unwrap_or(false);
+        let unread_snapshot = channels
+            .iter()
+            .map(|channel| {
+                format!(
+                    "{}:{}:{}",
+                    channel.channel_id, channel.channel_type, channel.unread_count
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         tracing::info!(
-            "load_session_list: channels={} bootstrap_completed={}",
+            "load_session_list: channels={} bootstrap_completed={} unread_snapshot=[{}]",
             channels.len(),
-            bootstrap_completed
+            bootstrap_completed,
+            unread_snapshot
         );
 
         Ok(channels
@@ -407,6 +459,79 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
         Ok(unread.max(0) as u32)
+    }
+
+    async fn sync_channel(&self, channel_id: u64, channel_type: i32) -> Result<usize, UiError> {
+        self.sdk
+            .sync_channel(channel_id, channel_type)
+            .await
+            .map_err(map_sdk_error)
+    }
+
+    async fn list_local_accounts(&self) -> Result<Vec<LocalAccountVm>, UiError> {
+        let mut accounts = self
+            .sdk
+            .list_local_accounts()
+            .await
+            .map_err(map_sdk_error)?;
+        accounts.sort_by(|a, b| b.last_login_at.cmp(&a.last_login_at));
+        Ok(accounts
+            .into_iter()
+            .map(|account| LocalAccountVm {
+                uid: account.uid,
+                is_active: account.is_active,
+                created_at: account.created_at,
+                last_login_at: account.last_login_at,
+            })
+            .collect())
+    }
+
+    async fn switch_to_local_account(&self, uid: String) -> Result<LoginSessionVm, UiError> {
+        let uid = uid.trim().to_string();
+        if uid.is_empty() {
+            return Err(UiError::Unknown("uid is required".to_string()));
+        }
+
+        // Keep switch flow deterministic: tear down current transport first, then
+        // authenticate target account and run a full sync pass.
+        if let Err(error) = self.sdk.disconnect().await {
+            tracing::warn!("switch_to_local_account: disconnect old session failed: {error}");
+        }
+
+        self.sdk
+            .set_current_uid(uid.clone())
+            .await
+            .map_err(map_sdk_error)?;
+        self.sdk.connect().await.map_err(map_sdk_error)?;
+
+        let snapshot = self
+            .sdk
+            .session_snapshot()
+            .await
+            .map_err(map_sdk_error)?
+            .ok_or_else(|| UiError::Unknown(format!("local account not found: {uid}")))?;
+
+        self.sdk
+            .authenticate(
+                snapshot.user_id,
+                snapshot.token.clone(),
+                snapshot.device_id.clone(),
+            )
+            .await
+            .map_err(map_sdk_error)?;
+
+        tracing::info!(
+            "switch_to_local_account: authenticate ok user_id={} bootstrap_completed={}",
+            snapshot.user_id,
+            snapshot.bootstrap_completed
+        );
+        self.run_post_auth_sync("switch_to_local_account").await?;
+
+        Ok(LoginSessionVm {
+            user_id: snapshot.user_id,
+            token: snapshot.token,
+            device_id: snapshot.device_id,
+        })
     }
 
     async fn logout(&self) -> Result<(), UiError> {
@@ -645,6 +770,65 @@ impl SdkBridge for PrivchatSdkBridge {
         }
     }
 
+    async fn get_or_create_direct_channel(
+        &self,
+        target_user_id: u64,
+    ) -> Result<(u64, i32), UiError> {
+        let response: GetOrCreateDirectChannelResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::channel::DIRECT_GET_OR_CREATE,
+                &GetOrCreateDirectChannelRequest {
+                    target_user_id,
+                    source: Some("contact_list".to_string()),
+                    source_id: Some(format!("contact:{target_user_id}")),
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+
+        if response.channel_id == 0 {
+            return Err(UiError::Unknown(
+                "get_or_create_direct_channel 返回了无效 channel_id=0".to_string(),
+            ));
+        }
+
+        let mut channel = self
+            .sdk
+            .get_channel_by_id(response.channel_id)
+            .await
+            .map_err(map_sdk_error)?;
+
+        if channel.is_none() {
+            let _ = self
+                .sdk
+                .sync_entities("channel".to_string(), None)
+                .await
+                .map_err(map_sdk_error)?;
+            channel = self
+                .sdk
+                .get_channel_by_id(response.channel_id)
+                .await
+                .map_err(map_sdk_error)?;
+        }
+
+        let channel = channel.ok_or_else(|| {
+            UiError::Unknown(format!(
+                "未找到会话信息: channel_id={}。请先等待同步完成后重试。",
+                response.channel_id
+            ))
+        })?;
+        if channel.channel_type <= 0 {
+            return Err(UiError::Unknown(format!(
+                "会话类型无效: channel_id={} channel_type={}",
+                response.channel_id, channel.channel_type
+            )));
+        }
+
+        Ok((response.channel_id, channel.channel_type))
+    }
+
     async fn login_with_password(
         &self,
         username: String,
@@ -675,11 +859,10 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
         tracing::info!(
-            "login_with_password: authenticate ok user_id={}, run bootstrap sync",
+            "login_with_password: authenticate ok user_id={}",
             result.user_id
         );
-        self.sdk.run_bootstrap_sync().await.map_err(map_sdk_error)?;
-        tracing::info!("login_with_password: bootstrap sync completed");
+        self.run_post_auth_sync("login_with_password").await?;
 
         Ok(LoginSessionVm {
             user_id: result.user_id,
@@ -700,14 +883,12 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
 
-        let channels = self
+        let channel = self
             .sdk
-            .list_channels(200, 0)
+            .get_channel_by_id(channel_id)
             .await
-            .map_err(map_sdk_error)?;
-        let channel = channels
-            .iter()
-            .find(|c| c.channel_id == channel_id && c.channel_type == channel_type);
+            .map_err(map_sdk_error)?
+            .filter(|c| c.channel_type == channel_type);
 
         let extra = self
             .sdk
@@ -715,7 +896,7 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
 
-        let unread_marker = adapter::map_unread_marker(channel, extra.as_ref());
+        let unread_marker = adapter::map_unread_marker(channel.as_ref(), extra.as_ref());
         Ok(adapter::map_snapshot_to_vm(
             &snapshot,
             current_uid,
@@ -731,6 +912,13 @@ impl SdkBridge for PrivchatSdkBridge {
         client_txn_id: ClientTxnId,
         body: String,
     ) -> Result<u64, UiError> {
+        if channel_id == 0 || channel_type <= 0 {
+            return Err(UiError::Unknown(format!(
+                "invalid send target: channel_id={} channel_type={}",
+                channel_id, channel_type
+            )));
+        }
+
         let current_uid = self
             .current_uid()
             .await?
@@ -744,7 +932,8 @@ impl SdkBridge for PrivchatSdkBridge {
                     channel_type,
                     from_uid: current_uid,
                     // Keep aligned with privchat-app sendTextWithLocalId semantics.
-                    message_type: ContentMessageType::Text as i32,
+                    // Server contract expects text=0.
+                    message_type: TEXT_MESSAGE_TYPE,
                     content: body,
                     searchable_word: String::new(),
                     setting: 0,
@@ -763,7 +952,7 @@ impl SdkBridge for PrivchatSdkBridge {
             .ok_or_else(|| {
                 UiError::Unknown("local message row missing after create".to_string())
             })?;
-        if stored.message_type != ContentMessageType::Text as i32 {
+        if stored.message_type != TEXT_MESSAGE_TYPE {
             return Err(UiError::Unknown(format!(
                 "unexpected local message_type={} for text send",
                 stored.message_type
@@ -793,16 +982,40 @@ impl SdkBridge for PrivchatSdkBridge {
         channel_type: i32,
         client_txn_id: ClientTxnId,
     ) -> Result<(), UiError> {
-        let messages = self
+        let direct_lookup = self
             .sdk
-            .list_messages(channel_id, channel_type, 200, 0)
+            .get_message_by_id(client_txn_id)
             .await
             .map_err(map_sdk_error)?;
 
-        let message = messages
-            .into_iter()
-            .find(|m| m.local_message_id == Some(client_txn_id))
-            .ok_or_else(|| UiError::Unknown("client_txn_id not found in timeline".to_string()))?;
+        let mut message =
+            direct_lookup.filter(|m| m.channel_id == channel_id && m.channel_type == channel_type);
+        if message.is_none() {
+            let messages = self
+                .sdk
+                .list_messages(channel_id, channel_type, 5000, 0)
+                .await
+                .map_err(map_sdk_error)?;
+            message = messages.into_iter().find(|m| {
+                m.local_message_id == Some(client_txn_id) || m.message_id == client_txn_id
+            });
+        }
+        let message = message.ok_or_else(|| {
+            UiError::Unknown(format!(
+                "retry target missing: channel_id={} channel_type={} client_txn_id={}",
+                channel_id, channel_type, client_txn_id
+            ))
+        })?;
+
+        tracing::info!(
+            "retry_send: channel_id={} channel_type={} client_txn_id={} message_id={} local_message_id={:?} status={}",
+            channel_id,
+            channel_type,
+            client_txn_id,
+            message.message_id,
+            message.local_message_id,
+            message.status
+        );
 
         self.sdk
             .enqueue_outbound_message(message.message_id, Vec::new())
@@ -819,10 +1032,16 @@ impl SdkBridge for PrivchatSdkBridge {
         before_server_message_id: Option<u64>,
         limit: usize,
     ) -> Result<HistoryPageVm, UiError> {
+        let t0 = Instant::now();
         let current_uid = self.current_uid().await?;
+        // SDK list_messages only supports (limit, offset), no cursor/before_id query.
+        // Fetch enough to cover the slice we need; keep limit small to avoid loading
+        // the entire channel history on every page request.
+        // TODO: if SDK gains a before_server_message_id cursor API, replace this.
+        let fetch_limit = (limit * 4).max(200);
         let messages = self
             .sdk
-            .list_messages(channel_id, channel_type, 3000, 0)
+            .list_messages(channel_id, channel_type, fetch_limit, 0)
             .await
             .map_err(map_sdk_error)?;
 
@@ -841,6 +1060,7 @@ impl SdkBridge for PrivchatSdkBridge {
         let items = older_slice[page_start..].to_vec();
         let oldest_server_message_id = items.iter().filter_map(|m| m.server_message_id).min();
 
+        reporting::report_history_loaded(channel_id, channel_type, items.len(), t0.elapsed());
         Ok(HistoryPageVm {
             has_more_before: page_start > 0,
             items,
@@ -865,16 +1085,93 @@ impl SdkBridge for PrivchatSdkBridge {
         channel_type: i32,
         last_read_pts: u64,
     ) -> Result<(), UiError> {
-        self.sdk
-            .project_channel_read_cursor(channel_id, channel_type, last_read_pts)
+        if channel_id == 0 || channel_type <= 0 {
+            return Err(UiError::Unknown(format!(
+                "invalid mark_read target: channel_id={} channel_type={}",
+                channel_id, channel_type
+            )));
+        }
+
+        let channel_type_u8 = u8::try_from(channel_type).map_err(|_| {
+            UiError::Unknown(format!(
+                "invalid channel_type for mark_read: {}",
+                channel_type
+            ))
+        })?;
+
+        let server_pts = self
+            .sdk
+            .rpc_call_typed::<_, GetChannelPtsResponse>(
+                routes::sync::GET_CHANNEL_PTS,
+                &GetChannelPtsRequest {
+                    channel_id,
+                    channel_type: channel_type_u8,
+                },
+            )
             .await
+            .map(|resp| resp.current_pts)
             .map_err(map_sdk_error)
+            .ok();
+
+        let pts_source = if last_read_pts > 0 {
+            MarkReadPtsSource::MessagePts
+        } else {
+            MarkReadPtsSource::RpcFallback
+        };
+        let read_pts = server_pts.filter(|pts| *pts > 0).unwrap_or(last_read_pts);
+        if read_pts == 0 {
+            tracing::warn!(
+                "bridge.mark_read skip: channel_id={} channel_type={} last_read_pts={} server_pts={:?} resolved_read_pts=0",
+                channel_id,
+                channel_type,
+                last_read_pts,
+                server_pts
+            );
+            return Ok(());
+        }
+
+        reporting::report_mark_read(channel_id, channel_type, read_pts, pts_source);
+        tracing::info!(
+            "bridge.mark_read: channel_id={} channel_type={} last_read_pts={} server_pts={:?} resolved_read_pts={}",
+            channel_id,
+            channel_type,
+            last_read_pts,
+            server_pts,
+            read_pts
+        );
+
+        // Same UX as privchat-app: first apply local projection so unread badge clears immediately.
+        self.sdk
+            .project_channel_read_cursor(channel_id, channel_type, read_pts)
+            .await
+            .map_err(map_sdk_error)?;
+
+        let _resp: MessageStatusReadPtsResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::message_status::READ_PTS,
+                &MessageStatusReadPtsRequest {
+                    channel_id,
+                    read_pts,
+                    last_read_message_id: None,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        tracing::info!(
+            "bridge.mark_read rpc ok: channel_id={} channel_type={} read_pts={}",
+            channel_id,
+            channel_type,
+            read_pts
+        );
+        Ok(())
     }
 
-    fn subscribe_timeline(&self) -> Subscription<SdkEvent> {
+    fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent> {
         Subscription::run_with(
             EventSubscriptionSeed {
                 sdk: self.sdk.clone(),
+                session_epoch,
             },
             sdk_event_stream,
         )

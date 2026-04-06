@@ -4,11 +4,32 @@ use iced::{Element, Length};
 use crate::app::message::AppMessage;
 use crate::app::state::AuthState;
 
-pub fn view(auth: &AuthState) -> Element<'_, AppMessage> {
+pub fn view(auth: &AuthState, add_account_mode: bool) -> Element<'_, AppMessage> {
+    let title: Element<'_, AppMessage> = if add_account_mode {
+        row![
+            button("←")
+                .padding([6, 10])
+                .on_press(AppMessage::LoginBackPressed),
+            text("添加账号").size(28),
+        ]
+        .spacing(10)
+        .align_y(iced::alignment::Vertical::Center)
+        .into()
+    } else {
+        text("PrivChat Login").size(28).into()
+    };
+
     let mut content = column![
-        text("PrivChat Login").size(28),
-        text_input("Username", &auth.username)
-            .on_input(|text| AppMessage::LoginUsernameChanged { text }),
+        title,
+        text_input(
+            if add_account_mode {
+                "PrivChat ID / Username"
+            } else {
+                "Username"
+            },
+            &auth.username
+        )
+        .on_input(|text| AppMessage::LoginUsernameChanged { text }),
         text_input("Password", &auth.password)
             .secure(true)
             .on_submit(AppMessage::LoginPressed)
@@ -24,13 +45,16 @@ pub fn view(auth: &AuthState) -> Element<'_, AppMessage> {
     } else {
         button("Login").on_press(AppMessage::LoginPressed)
     };
-    let register_button = if auth.is_submitting {
-        button("Registering...")
+    if add_account_mode {
+        content = content.push(row![login_button].spacing(8));
     } else {
-        button("Register").on_press(AppMessage::RegisterPressed)
-    };
-
-    content = content.push(row![login_button, register_button].spacing(8));
+        let register_button = if auth.is_submitting {
+            button("Registering...")
+        } else {
+            button("Register").on_press(AppMessage::RegisterPressed)
+        };
+        content = content.push(row![login_button, register_button].spacing(8));
+    }
 
     if let Some(error) = &auth.error {
         content = content.push(text(error));

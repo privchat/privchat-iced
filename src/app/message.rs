@@ -3,9 +3,29 @@ use iced::window;
 
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
-    GroupListItemVm, HistoryPageVm, LoginSessionVm, OpenToken, SearchUserVm, SessionListItemVm,
-    TimelineItemKey, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
+    GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, SearchUserVm,
+    SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm,
+    UiError,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageIngressSource {
+    TimelineUpdated,
+    MessageSendStatusChanged,
+    OutboundQueueUpdated,
+    SubscriptionMessageReceived,
+}
+
+impl MessageIngressSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TimelineUpdated => "timeline_updated",
+            Self::MessageSendStatusChanged => "message_send_status_changed",
+            Self::OutboundQueueUpdated => "outbound_queue_updated",
+            Self::SubscriptionMessageReceived => "subscription_message_received",
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AppMessage {
@@ -46,6 +66,20 @@ pub enum AppMessage {
     },
     RefreshSessionList,
     RefreshTotalUnreadCount,
+    RepairChannelSyncRequested {
+        channel_id: u64,
+        channel_type: i32,
+    },
+    RepairChannelSyncSucceeded {
+        channel_id: u64,
+        channel_type: i32,
+        applied: usize,
+    },
+    RepairChannelSyncFailed {
+        channel_id: u64,
+        channel_type: i32,
+        error: UiError,
+    },
     LoginUsernameChanged {
         text: String,
     },
@@ -55,6 +89,7 @@ pub enum AppMessage {
     LoginDeviceIdChanged {
         text: String,
     },
+    LoginBackPressed,
     FocusNextWidget {
         window_id: window::Id,
     },
@@ -90,7 +125,27 @@ pub enum AppMessage {
     ToggleSettingsMenu,
     DismissSettingsMenu,
     SettingsMenuOpenSettings,
+    SettingsMenuSwitchAccount,
     SettingsMenuLogout,
+    CloseSwitchAccountPanel,
+    SwitchAccountListLoaded {
+        accounts: Vec<LocalAccountVm>,
+    },
+    SwitchAccountListLoadFailed {
+        error: UiError,
+    },
+    SwitchAccountPressed {
+        uid: String,
+    },
+    SwitchAccountAddPressed,
+    SwitchAccountSucceeded {
+        uid: String,
+        session: LoginSessionVm,
+    },
+    SwitchAccountFailed {
+        uid: String,
+        error: UiError,
+    },
     LoginPressed,
     RegisterPressed,
     LoginSucceeded {
@@ -157,6 +212,21 @@ pub enum AppMessage {
         item: AddFriendSelectionVm,
         error: UiError,
     },
+    AddFriendDetailSendMessagePressed {
+        user_id: u64,
+    },
+    AddFriendOpenConversationResolved {
+        user_id: u64,
+        channel_id: u64,
+        channel_type: i32,
+    },
+    AddFriendOpenConversationFailed {
+        user_id: u64,
+        error: UiError,
+    },
+    AddFriendDetailAddFriendPressed {
+        user_id: u64,
+    },
     ToggleNewFriendsSection,
     ToggleGroupSection,
     ToggleFriendSection,
@@ -175,6 +245,26 @@ pub enum AppMessage {
         channel_id: u64,
         channel_type: i32,
         client_txn_id: ClientTxnId,
+    },
+    GlobalMessageIngress {
+        message_id: u64,
+        channel_id: Option<u64>,
+        channel_type: Option<i32>,
+        source: MessageIngressSource,
+    },
+    GlobalMessageLoaded {
+        message_id: u64,
+        channel_id: Option<u64>,
+        channel_type: Option<i32>,
+        source: MessageIngressSource,
+        message: Option<crate::presentation::vm::MessageVm>,
+    },
+    GlobalMessageLoadFailed {
+        message_id: u64,
+        channel_id: Option<u64>,
+        channel_type: Option<i32>,
+        source: MessageIngressSource,
+        error: UiError,
     },
     TimelineUpdatedIngress {
         channel_id: u64,
@@ -212,6 +302,5 @@ pub enum AppMessage {
         channel_type: i32,
         at_bottom: bool,
         near_top: bool,
-        first_visible_item: Option<TimelineItemKey>,
     },
 }

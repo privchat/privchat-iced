@@ -34,11 +34,14 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
             })
             .map(|item| item.title.as_str())
     });
+    let active_title = active_title
+        .or_else(|| state.active_chat.as_ref().map(|chat| chat.title.as_str()))
+        .unwrap_or("PrivChat");
 
     let detail: Element<'_, AppMessage> = match state.route {
         Route::Chat => {
             if let Some(chat_state) = &state.active_chat {
-                chat::view(chat_state, active_title.unwrap_or("TITLE_ERR"))
+                chat::view(chat_state, active_title)
             } else {
                 empty_detail("请选择一个会话")
             }
@@ -46,6 +49,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
         Route::AddFriend => add_friend::detail_view(&state.add_friend),
         Route::Settings => settings::view(&state.settings),
         Route::SessionList => empty_detail("请选择一个会话"),
+        Route::SwitchAccount => empty_detail(""),
         Route::Login => empty_detail(""),
         Route::Splash => empty_detail(""),
     };
@@ -116,9 +120,6 @@ fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
             None,
             AppMessage::OpenAddFriendPage
         ),
-        nav_icon(Icon::Box, false, None, AppMessage::Noop),
-        nav_icon(Icon::Compass, false, None, AppMessage::Noop),
-        nav_icon(Icon::Link, false, None, AppMessage::Noop),
     ]
     .spacing(12)
     .align_x(alignment::Horizontal::Center);
@@ -303,6 +304,18 @@ fn settings_menu_popup() -> Element<'static, AppMessage> {
             .width(Length::Fill)
             .style(menu_item_style)
             .on_press(AppMessage::SettingsMenuOpenSettings),
+            button(
+                container(
+                    text("切换账号")
+                        .size(14)
+                        .color(Color::from_rgb8(0xE6, 0xEB, 0xF2))
+                )
+                .width(Length::Fill)
+                .padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .style(menu_item_style)
+            .on_press(AppMessage::SettingsMenuSwitchAccount),
             button(
                 container(
                     text("退出")

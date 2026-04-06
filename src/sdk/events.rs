@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use privchat_sdk::SdkEvent;
 use tracing::{info, warn};
 
-use crate::app::message::AppMessage;
+use crate::app::message::{AppMessage, MessageIngressSource};
+use crate::app::reporting;
 use crate::presentation::vm::{ClientTxnId, OpenToken, TimelineRevision};
 
 #[derive(Debug, Clone, Default, Hash)]
@@ -66,12 +67,29 @@ fn is_contact_entity(entity_type: &str) -> bool {
     )
 }
 
-fn ingress_from_context(context: &EventMapContext, message_id: u64) -> AppMessage {
-    AppMessage::TimelineUpdatedIngress {
-        channel_id: context.channel_id,
-        channel_type: context.channel_type,
-        open_token: context.open_token,
-        message_id,
+fn sdk_event_type(event: &SdkEvent) -> &'static str {
+    match event {
+        SdkEvent::ConnectionStateChanged { .. } => "connection_state_changed",
+        SdkEvent::BootstrapCompleted { .. } => "bootstrap_completed",
+        SdkEvent::ResumeSyncStarted => "resume_sync_started",
+        SdkEvent::ResumeSyncCompleted { .. } => "resume_sync_completed",
+        SdkEvent::ResumeSyncFailed { .. } => "resume_sync_failed",
+        SdkEvent::ResumeSyncEscalated { .. } => "resume_sync_escalated",
+        SdkEvent::ResumeSyncChannelStarted { .. } => "resume_sync_channel_started",
+        SdkEvent::ResumeSyncChannelCompleted { .. } => "resume_sync_channel_completed",
+        SdkEvent::ResumeSyncChannelFailed { .. } => "resume_sync_channel_failed",
+        SdkEvent::SyncEntitiesApplied { .. } => "sync_entities_applied",
+        SdkEvent::SyncEntityChanged { .. } => "sync_entity_changed",
+        SdkEvent::SyncChannelApplied { .. } => "sync_channel_applied",
+        SdkEvent::SyncAllChannelsApplied { .. } => "sync_all_channels_applied",
+        SdkEvent::NetworkHintChanged { .. } => "network_hint_changed",
+        SdkEvent::OutboundQueueUpdated { .. } => "outbound_queue_updated",
+        SdkEvent::TimelineUpdated { .. } => "timeline_updated",
+        SdkEvent::MessageSendStatusChanged { .. } => "message_send_status_changed",
+        SdkEvent::TypingSent { .. } => "typing_sent",
+        SdkEvent::SubscriptionMessageReceived { .. } => "subscription_message_received",
+        SdkEvent::ShutdownStarted => "shutdown_started",
+        SdkEvent::ShutdownCompleted => "shutdown_completed",
     }
 }
 
@@ -83,10 +101,11 @@ pub fn map_sdk_event_without_context(event: SdkEvent) -> AppMessage {
     map_sdk_event(event, None)
 }
 
-/// Map SDK events into app messages with optional active-chat context.
-/// - Active chat timeline updates are routed to timeline ingress.
-/// - Non-active updates trigger session list refresh.
-pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppMessage {
+/// Map SDK events into app messages.
+/// Message-related events are normalized into global ingress so the app can
+/// resolve message payloads and refresh UI from a single path (like privchat-app).
+pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> AppMessage {
+    reporting::report_sdk_event(sdk_event_type(&event));
     match event {
         SdkEvent::ConnectionStateChanged { from, to } => {
             info!("sdk_event: connection_state_changed {:?} -> {:?}", from, to);
@@ -171,7 +190,10 @@ pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppM
                 "sdk_event: resume_sync_channel_failed channel_id={} channel_type={} classification={:?} scope={:?} code={} message={}",
                 channel_id, channel_type, classification, scope, error_code, message
             );
-            AppMessage::RefreshSessionList
+            AppMessage::RepairChannelSyncRequested {
+                channel_id,
+                channel_type,
+            }
         }
         SdkEvent::BootstrapCompleted { user_id } => {
             info!("sdk_event: bootstrap_completed user_id={user_id}");
@@ -243,20 +265,16 @@ pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppM
             message_id,
             reason,
         } => {
-            if let Some(context) = context {
-                if channel_id == context.channel_id && channel_type == context.channel_type {
-                    info!(
-                        "sdk_event: timeline_updated active channel_id={} channel_type={} message_id={} reason={}",
-                        channel_id, channel_type, message_id, reason
-                    );
-                    return ingress_from_context(context, message_id);
-                }
-            }
             info!(
-                "sdk_event: timeline_updated background channel_id={} channel_type={} message_id={} reason={}",
+                "sdk_event: timeline_updated channel_id={} channel_type={} message_id={} reason={}",
                 channel_id, channel_type, message_id, reason
             );
-            AppMessage::RefreshSessionList
+            AppMessage::GlobalMessageIngress {
+                message_id,
+                channel_id: Some(channel_id),
+                channel_type: Some(channel_type),
+                source: MessageIngressSource::TimelineUpdated,
+            }
         }
         SdkEvent::MessageSendStatusChanged {
             message_id,
@@ -267,9 +285,11 @@ pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppM
                 "sdk_event: message_send_status_changed message_id={} status={} server_message_id={:?}",
                 message_id, status, server_message_id
             );
-            match context {
-                Some(context) => ingress_from_context(context, message_id),
-                None => AppMessage::RefreshSessionList,
+            AppMessage::GlobalMessageIngress {
+                message_id,
+                channel_id: None,
+                channel_type: None,
+                source: MessageIngressSource::MessageSendStatusChanged,
             }
         }
         SdkEvent::OutboundQueueUpdated {
@@ -282,12 +302,29 @@ pub fn map_sdk_event(event: SdkEvent, context: Option<&EventMapContext>) -> AppM
                 "sdk_event: outbound_queue_updated kind={} action={} message_id={:?} queue_index={:?}",
                 kind, action, message_id, queue_index
             );
-            match (context, message_id) {
-                (Some(context), Some(message_id)) => ingress_from_context(context, message_id),
-                (None, Some(_)) => AppMessage::RefreshSessionList,
-                (_, None) => AppMessage::Noop,
+            match message_id {
+                Some(message_id) => AppMessage::GlobalMessageIngress {
+                    message_id,
+                    channel_id: None,
+                    channel_type: None,
+                    source: MessageIngressSource::OutboundQueueUpdated,
+                },
+                None => AppMessage::Noop,
             }
         }
+        SdkEvent::SubscriptionMessageReceived {
+            channel_id,
+            server_message_id,
+            ..
+        } => match server_message_id {
+            Some(message_id) => AppMessage::GlobalMessageIngress {
+                message_id,
+                channel_id: Some(channel_id),
+                channel_type: None,
+                source: MessageIngressSource::SubscriptionMessageReceived,
+            },
+            None => AppMessage::Noop,
+        },
         _ => AppMessage::Noop,
     }
 }
@@ -323,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn timeline_updated_maps_when_active_channel_matches() {
+    fn timeline_updated_maps_to_global_ingress() {
         let context = base_context();
         let mapped = map_sdk_event_to_app_message(
             SdkEvent::TimelineUpdated {
@@ -337,17 +374,17 @@ mod tests {
 
         assert!(matches!(
             mapped,
-            Some(AppMessage::TimelineUpdatedIngress {
-                channel_id: 100,
-                channel_type: 2,
-                open_token: 7,
-                message_id: 11
+            Some(AppMessage::GlobalMessageIngress {
+                message_id: 11,
+                channel_id: Some(100),
+                channel_type: Some(2),
+                source: MessageIngressSource::TimelineUpdated,
             })
         ));
     }
 
     #[test]
-    fn timeline_updated_is_dropped_when_channel_mismatches() {
+    fn timeline_updated_keeps_background_channel() {
         let context = base_context();
         let mapped = map_sdk_event_to_app_message(
             SdkEvent::TimelineUpdated {
@@ -359,11 +396,19 @@ mod tests {
             &context,
         );
 
-        assert!(mapped.is_none());
+        assert!(matches!(
+            mapped,
+            Some(AppMessage::GlobalMessageIngress {
+                message_id: 11,
+                channel_id: Some(999),
+                channel_type: Some(2),
+                source: MessageIngressSource::TimelineUpdated,
+            })
+        ));
     }
 
     #[test]
-    fn send_status_always_maps_to_ingress_for_active_context() {
+    fn send_status_maps_to_global_ingress() {
         let context = base_context();
         let mapped = map_sdk_event_to_app_message(
             SdkEvent::MessageSendStatusChanged {
@@ -375,11 +420,11 @@ mod tests {
         );
         assert!(matches!(
             mapped,
-            Some(AppMessage::TimelineUpdatedIngress {
-                channel_id: 100,
-                channel_type: 2,
-                open_token: 7,
+            Some(AppMessage::GlobalMessageIngress {
                 message_id: 11,
+                channel_id: None,
+                channel_type: None,
+                source: MessageIngressSource::MessageSendStatusChanged,
             })
         ));
 
@@ -393,11 +438,11 @@ mod tests {
         );
         assert!(matches!(
             fallback,
-            Some(AppMessage::TimelineUpdatedIngress {
-                channel_id: 100,
-                channel_type: 2,
-                open_token: 7,
+            Some(AppMessage::GlobalMessageIngress {
                 message_id: 999,
+                channel_id: None,
+                channel_type: None,
+                source: MessageIngressSource::MessageSendStatusChanged,
             })
         ));
     }

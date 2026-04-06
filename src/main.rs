@@ -64,7 +64,11 @@ fn view(app: &PrivchatApp, window_id: window::Id) -> Element<'_, AppMessage> {
 
     match app.state.route {
         Route::Splash => ui::screens::splash::view(),
-        Route::Login => ui::screens::login::view(&app.state.auth),
+        Route::Login => ui::screens::login::view(
+            &app.state.auth,
+            app.state.switch_account.add_account_login_mode,
+        ),
+        Route::SwitchAccount => ui::screens::switch_account::view(&app.state.switch_account),
         Route::Chat | Route::AddFriend | Route::Settings | Route::SessionList => {
             ui::screens::workspace::view(&app.state)
         }
@@ -80,17 +84,28 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
         return "Add Contacts".to_string();
     }
 
-    let active_peer_name = app.state.active_chat.as_ref().and_then(|active| {
-        app.state
-            .session_list
-            .items
-            .iter()
-            .find(|item| {
-                item.channel_id == active.channel_id && item.channel_type == active.channel_type
-            })
-            .map(|item| item.title.trim())
-            .filter(|title| !title.is_empty())
-    });
+    let active_peer_name = app
+        .state
+        .active_chat
+        .as_ref()
+        .and_then(|active| {
+            app.state
+                .session_list
+                .items
+                .iter()
+                .find(|item| {
+                    item.channel_id == active.channel_id && item.channel_type == active.channel_type
+                })
+                .map(|item| item.title.trim())
+                .filter(|title| !title.is_empty())
+        })
+        .or_else(|| {
+            app.state
+                .active_chat
+                .as_ref()
+                .map(|chat| chat.title.trim())
+                .filter(|title| !title.is_empty())
+        });
 
     let my_name = if app.state.auth.username.trim().is_empty() {
         app.state
@@ -118,6 +133,7 @@ fn main_window_settings() -> window::Settings {
 
 fn main() -> iced::Result {
     tracing_subscriber::fmt::init();
+    app::reporting::install_report_sink(Arc::new(app::reporting::TracingReportSink));
 
     iced::daemon(boot, update, view)
         .title(window_title)

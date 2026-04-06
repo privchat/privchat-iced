@@ -22,6 +22,14 @@ pub struct LoginSessionVm {
 }
 
 #[derive(Debug, Clone, Default)]
+pub struct LocalAccountVm {
+    pub uid: String,
+    pub is_active: bool,
+    pub created_at: i64,
+    pub last_login_at: i64,
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct SessionListItemVm {
     pub channel_id: u64,
     pub channel_type: i32,

@@ -167,6 +167,23 @@ pub fn detail_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
             .width(Length::Fill)
             .height(Length::Shrink);
 
+        if let Some(action) = detail_primary_action(state) {
+            content = content.push(section_divider()).push(
+                container(
+                    button(
+                        text(action.label())
+                            .size(15)
+                            .color(Color::from_rgb8(0xF9, 0xFC, 0xFF)),
+                    )
+                    .padding([10, 26])
+                    .style(detail_primary_button_style)
+                    .on_press(action.message()),
+                )
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center),
+            );
+        }
+
         return container(
             scrollable(
                 container(content)
@@ -191,6 +208,52 @@ pub fn detail_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
     }
 
     center_tip("请选择一个联系人")
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DetailPrimaryAction {
+    SendMessage { user_id: u64 },
+    AddFriend { user_id: u64 },
+}
+
+impl DetailPrimaryAction {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SendMessage { .. } => "发送消息",
+            Self::AddFriend { .. } => "添加好友",
+        }
+    }
+
+    fn message(self) -> AppMessage {
+        match self {
+            Self::SendMessage { user_id } => {
+                AppMessage::AddFriendDetailSendMessagePressed { user_id }
+            }
+            Self::AddFriend { user_id } => AppMessage::AddFriendDetailAddFriendPressed { user_id },
+        }
+    }
+}
+
+fn detail_primary_action(state: &AddFriendState) -> Option<DetailPrimaryAction> {
+    match state.selected_panel_item {
+        Some(AddFriendSelectionVm::Friend(user_id)) => {
+            Some(DetailPrimaryAction::SendMessage { user_id })
+        }
+        Some(AddFriendSelectionVm::Request(user_id)) => {
+            let is_added = state
+                .requests
+                .iter()
+                .find(|request| request.from_user_id == user_id)
+                .map(|request| request.is_added)
+                .unwrap_or(false);
+            if is_added {
+                Some(DetailPrimaryAction::SendMessage { user_id })
+            } else {
+                Some(DetailPrimaryAction::AddFriend { user_id })
+            }
+        }
+        _ => None,
+    }
 }
 
 fn empty_tip(label: &str) -> Element<'_, AppMessage> {
@@ -806,7 +869,7 @@ fn search_result_card(
         },
         28,
     );
-    let subtitle = format!("Weixin ID: {}", user.username);
+    let subtitle = format!("PrivChat ID: {}", user.username);
     let tip = feedback
         .unwrap_or("点击 Add to Contacts 发送好友申请")
         .to_string();
@@ -937,6 +1000,22 @@ fn add_to_contacts_button_style(_theme: &Theme, status: button::Status) -> butto
         background: Some(Background::Color(bg)),
         text_color: Color::from_rgb8(0xE8, 0xED, 0xF3),
         border: border::rounded(9.0),
+        shadow: Default::default(),
+        snap: true,
+    }
+}
+
+fn detail_primary_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb8(0xDE, 0x84, 0x16),
+        button::Status::Pressed => Color::from_rgb8(0xBA, 0x6F, 0x14),
+        _ => Color::from_rgb8(0xC2, 0x76, 0x19),
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::from_rgb8(0xF8, 0xFC, 0xFF),
+        border: border::rounded(8.0),
         shadow: Default::default(),
         snap: true,
     }

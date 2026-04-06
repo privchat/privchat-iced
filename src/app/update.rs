@@ -7,7 +7,8 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::app::auth_prefs;
-use crate::app::message::AppMessage;
+use crate::app::message::{AppMessage, MessageIngressSource};
+use crate::app::reporting::{self, TimelinePatchKind};
 use crate::app::route::Route;
 use crate::app::state::{
     AppState, ChatScreenState, ComposerState, RuntimeMessageIndex, TimelineState,
@@ -41,29 +42,73 @@ pub fn update(
             if let Some(session) = session {
                 apply_login_success(state, session.user_id, session.token, session.device_id);
                 return Task::batch([
-                    schedule_session_list_refresh(bridge),
+                    schedule_session_list_refresh(state, bridge),
                     schedule_total_unread_refresh(bridge),
+                    schedule_local_accounts_refresh(bridge),
                 ]);
             } else {
                 state.route = Route::Login;
                 state.auth.is_submitting = false;
+                state.switch_account.add_account_login_mode = false;
             }
             Task::none()
         }
 
         AppMessage::SessionListLoaded { items } => {
+            state.session_list.is_loading = false;
             state.session_list.items = items;
             state.session_list.load_error = None;
-            schedule_total_unread_refresh(bridge)
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(item) = state.session_list.items.iter().find(|item| {
+                    item.channel_id == chat.channel_id && item.channel_type == chat.channel_type
+                }) {
+                    if !item.title.trim().is_empty() {
+                        chat.title = item.title.clone();
+                    }
+                }
+            }
+            if let Some((channel_id, channel_type)) = state
+                .active_chat
+                .as_ref()
+                .map(|chat| (chat.channel_id, chat.channel_type))
+            {
+                clear_local_unread_for_channel(state, channel_id, channel_type);
+            }
+            state.session_list.total_unread_count = state
+                .session_list
+                .items
+                .iter()
+                .map(|item| item.unread_count)
+                .sum();
+            let mut tasks = vec![schedule_total_unread_refresh(bridge)];
+            if state.session_list.refresh_pending {
+                tasks.push(schedule_session_list_refresh(state, bridge));
+            }
+            Task::batch(tasks)
         }
 
         AppMessage::SessionListLoadFailed { error } => {
+            state.session_list.is_loading = false;
             state.session_list.load_error = Some(format_ui_error(&error));
-            Task::none()
+            if state.session_list.refresh_pending {
+                schedule_session_list_refresh(state, bridge)
+            } else {
+                Task::none()
+            }
         }
 
         AppMessage::TotalUnreadCountLoaded { count } => {
-            state.session_list.total_unread_count = count;
+            // Keep badge consistent with current local session list projection, like privchat-app.
+            if state.session_list.items.is_empty() {
+                state.session_list.total_unread_count = count;
+            } else {
+                state.session_list.total_unread_count = state
+                    .session_list
+                    .items
+                    .iter()
+                    .map(|item| item.unread_count)
+                    .sum();
+            }
             Task::none()
         }
 
@@ -73,7 +118,55 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::RefreshSessionList => schedule_session_list_refresh(bridge),
+        AppMessage::RefreshSessionList => schedule_session_list_refresh(state, bridge),
+
+        AppMessage::RepairChannelSyncRequested {
+            channel_id,
+            channel_type,
+        } => schedule_channel_sync_repair(bridge, channel_id, channel_type),
+
+        AppMessage::RepairChannelSyncSucceeded {
+            channel_id,
+            channel_type,
+            applied,
+        } => {
+            if applied == 0 {
+                return schedule_session_list_refresh(state, bridge);
+            }
+
+            let mut tasks = vec![
+                schedule_session_list_refresh(state, bridge),
+                schedule_total_unread_refresh(bridge),
+            ];
+            if state
+                .active_chat
+                .as_ref()
+                .map(|chat| chat.channel_id == channel_id && chat.channel_type == channel_type)
+                .unwrap_or(false)
+            {
+                tasks.push(handle_conversation_selected(
+                    state,
+                    bridge,
+                    channel_id,
+                    channel_type,
+                ));
+            }
+            Task::batch(tasks)
+        }
+
+        AppMessage::RepairChannelSyncFailed {
+            channel_id,
+            channel_type,
+            error,
+        } => {
+            warn!(
+                "repair channel sync failed: channel_id={} channel_type={} error={}",
+                channel_id,
+                channel_type,
+                format_ui_error(&error)
+            );
+            schedule_session_list_refresh(state, bridge)
+        }
 
         AppMessage::RefreshAddFriendData => {
             if state.auth.user_id.is_none() {
@@ -283,6 +376,17 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::SettingsMenuSwitchAccount => {
+            state.overlay.settings_menu_open = false;
+            state.switch_account.loading = true;
+            state.switch_account.switching_uid = None;
+            state.switch_account.error = None;
+            state.switch_account.return_route = state.route.clone();
+            state.switch_account.add_account_login_mode = false;
+            state.route = Route::SwitchAccount;
+            schedule_local_accounts_refresh(bridge)
+        }
+
         AppMessage::SettingsMenuLogout => {
             apply_logout(state);
             let bridge = Arc::clone(bridge);
@@ -296,6 +400,134 @@ pub fn update(
             )
         }
 
+        AppMessage::CloseSwitchAccountPanel => {
+            state.switch_account.loading = false;
+            state.switch_account.switching_uid = None;
+            state.switch_account.error = None;
+            state.switch_account.add_account_login_mode = false;
+            if state.auth.user_id.is_none() {
+                state.route = Route::Login;
+            } else {
+                state.route = resolve_switch_account_return_route(state);
+            }
+            Task::none()
+        }
+
+        AppMessage::SwitchAccountListLoaded { accounts } => {
+            state.switch_account.accounts = accounts;
+            state.switch_account.loading = false;
+            state.switch_account.error = None;
+            Task::none()
+        }
+
+        AppMessage::SwitchAccountListLoadFailed { error } => {
+            state.switch_account.loading = false;
+            state.switch_account.error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::SwitchAccountPressed { uid } => {
+            if uid.trim().is_empty() || state.switch_account.loading {
+                return Task::none();
+            }
+            if state
+                .switch_account
+                .accounts
+                .iter()
+                .any(|account| account.uid == uid && account.is_active)
+            {
+                state.switch_account.loading = false;
+                state.switch_account.switching_uid = None;
+                state.switch_account.error = None;
+                state.route = resolve_switch_account_return_route(state);
+                return Task::none();
+            }
+
+            state.switch_account.loading = true;
+            state.switch_account.switching_uid = Some(uid.clone());
+            state.switch_account.error = None;
+            // Force subscription teardown immediately when switch starts.
+            // This prevents stale events from the old account leaking into UI
+            // while switch_to_local_account is in-flight.
+            state.session_epoch = state.session_epoch.wrapping_add(1);
+
+            // Eagerly clear the old user's state so that any stale SDK events
+            // (emitted during the in-flight switch_to_local_account task) land
+            // on empty state and produce no harmful mutations.
+            state.active_chat = None;
+            state.session_list.items.clear();
+            state.session_list.total_unread_count = 0;
+            state.session_list.is_loading = false;
+            state.session_list.refresh_pending = false;
+
+            let bridge = Arc::clone(bridge);
+            let uid_for_task = uid.clone();
+            Task::perform(
+                async move { bridge.switch_to_local_account(uid_for_task).await },
+                move |result| match result {
+                    Ok(session) => AppMessage::SwitchAccountSucceeded { uid, session },
+                    Err(error) => AppMessage::SwitchAccountFailed { uid, error },
+                },
+            )
+        }
+
+        AppMessage::SwitchAccountAddPressed => {
+            state.switch_account.add_account_login_mode = true;
+            state.auth.is_submitting = false;
+            state.auth.error = None;
+            state.auth.password.clear();
+            if Uuid::parse_str(state.auth.device_id.trim()).is_err() {
+                state.auth.device_id = Uuid::new_v4().to_string();
+            }
+            state.route = Route::Login;
+            Task::none()
+        }
+
+        AppMessage::SwitchAccountSucceeded { uid, session } => {
+            apply_logout(state);
+            state.auth.username = uid;
+            apply_login_success(state, session.user_id, session.token, session.device_id);
+            state.switch_account.loading = false;
+            state.switch_account.switching_uid = None;
+            state.switch_account.error = None;
+            state.switch_account.add_account_login_mode = false;
+            // At this point session_epoch is bumped (via apply_login_success), so
+            // the next subscription() call will create a fresh SDK event stream.
+            // All data from sync_all_channels (run inside switch_to_local_account)
+            // is already in the DB — just reload from it.
+            Task::batch([
+                schedule_session_list_refresh(state, bridge),
+                schedule_total_unread_refresh(bridge),
+                schedule_local_accounts_refresh(bridge),
+            ])
+        }
+
+        AppMessage::SwitchAccountFailed { uid, error } => {
+            state.switch_account.loading = false;
+            state.switch_account.switching_uid = None;
+            state.switch_account.error = Some(format!(
+                "切换账号失败（{}）: {}",
+                uid,
+                format_ui_error(&error)
+            ));
+            // Ensure event stream can be rebuilt after a failed switch that may
+            // have disconnected transport and closed receiver.
+            state.session_epoch = state.session_epoch.wrapping_add(1);
+            Task::none()
+        }
+
+        AppMessage::LoginBackPressed => {
+            if state.switch_account.add_account_login_mode && state.auth.user_id.is_some() {
+                state.switch_account.add_account_login_mode = false;
+                state.auth.is_submitting = false;
+                state.auth.error = None;
+                state.auth.password.clear();
+                state.route = Route::SwitchAccount;
+                return schedule_local_accounts_refresh(bridge);
+            }
+            Task::none()
+        }
+
         AppMessage::LoginPressed => handle_login_submit(state, bridge, false),
 
         AppMessage::RegisterPressed => handle_login_submit(state, bridge, true),
@@ -307,8 +539,9 @@ pub fn update(
         } => {
             apply_login_success(state, user_id, token, device_id);
             Task::batch([
-                schedule_session_list_refresh(bridge),
+                schedule_session_list_refresh(state, bridge),
                 schedule_total_unread_refresh(bridge),
+                schedule_local_accounts_refresh(bridge),
             ])
         }
 
@@ -335,12 +568,19 @@ pub fn update(
             if let Some(chat) = &mut state.active_chat {
                 chat.timeline.revision = snapshot.revision;
                 chat.timeline.items = snapshot.items;
+                normalize_timeline_items(&mut chat.timeline.items);
                 chat.timeline.oldest_server_message_id = snapshot.oldest_server_message_id;
                 chat.timeline.has_more_before = snapshot.has_more_before;
                 chat.unread_marker = snapshot.unread_marker;
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
             }
-            Task::none()
+            clear_local_unread_for_channel(state, channel_id, channel_type);
+            let last_read_pts = state
+                .active_chat
+                .as_ref()
+                .and_then(|chat| latest_read_pts(&chat.timeline.items))
+                .unwrap_or(0);
+            schedule_mark_read_task(bridge, channel_id, channel_type, last_read_pts)
         }
 
         AppMessage::ConversationOpenFailed {
@@ -468,6 +708,67 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::AddFriendDetailSendMessagePressed { user_id } => {
+            state.add_friend.detail_error = None;
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.get_or_create_direct_channel(user_id).await },
+                move |result| match result {
+                    Ok((channel_id, channel_type)) => {
+                        AppMessage::AddFriendOpenConversationResolved {
+                            user_id,
+                            channel_id,
+                            channel_type,
+                        }
+                    }
+                    Err(error) => AppMessage::AddFriendOpenConversationFailed { user_id, error },
+                },
+            )
+        }
+
+        AppMessage::AddFriendOpenConversationResolved {
+            user_id,
+            channel_id,
+            channel_type,
+        } => {
+            state.add_friend.feedback = Some(format!("正在打开与 {user_id} 的会话..."));
+            Task::batch([
+                handle_conversation_selected(state, bridge, channel_id, channel_type),
+                schedule_session_list_refresh(state, bridge),
+            ])
+        }
+
+        AppMessage::AddFriendOpenConversationFailed { user_id, error } => {
+            state.add_friend.detail_error = Some(format!(
+                "打开与 {user_id} 的会话失败: {}",
+                format_ui_error(&error)
+            ));
+            Task::none()
+        }
+
+        AppMessage::AddFriendDetailAddFriendPressed { user_id } => {
+            let already_friend = state
+                .add_friend
+                .friends
+                .iter()
+                .any(|friend| friend.user_id == user_id);
+            if already_friend {
+                state.add_friend.feedback = Some("该用户已是好友".to_string());
+                return Task::none();
+            }
+
+            state.add_friend.feedback = Some("发送好友申请中...".to_string());
+
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.send_friend_request(user_id, None, None).await },
+                |result| match result {
+                    Ok(user_id) => AppMessage::AddFriendRequestSucceeded { user_id },
+                    Err(error) => AppMessage::AddFriendRequestFailed { error },
+                },
+            )
+        }
+
         AppMessage::ToggleNewFriendsSection => {
             state.add_friend.new_friends_expanded = !state.add_friend.new_friends_expanded;
             Task::none()
@@ -587,6 +888,56 @@ pub fn update(
             client_txn_id,
         } => handle_retry_send_pressed(state, bridge, channel_id, channel_type, client_txn_id),
 
+        AppMessage::GlobalMessageIngress {
+            message_id,
+            channel_id,
+            channel_type,
+            source,
+        } => handle_global_message_ingress(
+            state,
+            bridge,
+            message_id,
+            channel_id,
+            channel_type,
+            source,
+        ),
+
+        AppMessage::GlobalMessageLoaded {
+            message_id,
+            channel_id,
+            channel_type,
+            source,
+            message,
+        } => handle_global_message_loaded(
+            state,
+            bridge,
+            message_id,
+            channel_id,
+            channel_type,
+            source,
+            message,
+        ),
+
+        AppMessage::GlobalMessageLoadFailed {
+            message_id,
+            channel_id,
+            channel_type,
+            source,
+            error,
+        } => {
+            reporting::report_message_load_failed(
+                source,
+                message_id,
+                channel_id,
+                channel_type,
+                &format_ui_error(&error),
+            );
+            Task::batch([
+                schedule_session_list_refresh(state, bridge),
+                schedule_total_unread_refresh(bridge),
+            ])
+        }
+
         AppMessage::TimelineUpdatedIngress {
             channel_id,
             channel_type,
@@ -653,6 +1004,7 @@ pub fn update(
                 chat.timeline.oldest_server_message_id = page.oldest_server_message_id;
                 chat.timeline.has_more_before = page.has_more_before;
                 prepend_history_items(&mut chat.timeline.items, page.items);
+                normalize_timeline_items(&mut chat.timeline.items);
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
             }
             Task::none()
@@ -678,7 +1030,6 @@ pub fn update(
             channel_type,
             at_bottom,
             near_top,
-            first_visible_item,
         } => handle_viewport_changed(
             state,
             bridge,
@@ -686,7 +1037,6 @@ pub fn update(
             channel_type,
             at_bottom,
             near_top,
-            first_visible_item,
         ),
     }
 }
@@ -717,16 +1067,19 @@ fn handle_conversation_selected(
     }
 
     let open_token = state.allocate_open_token();
+    let resolved_title = resolve_chat_title(state, channel_id, channel_type);
     state.route = Route::Chat;
     state.active_chat = Some(ChatScreenState {
         channel_id,
         channel_type,
+        title: resolved_title,
         open_token,
         timeline: TimelineState::default(),
         runtime_index: RuntimeMessageIndex::default(),
         composer: ComposerState::default(),
         unread_marker: UnreadMarkerVm::default(),
     });
+    clear_local_unread_for_channel(state, channel_id, channel_type);
 
     let bridge = Arc::clone(bridge);
     Task::perform(
@@ -748,6 +1101,36 @@ fn handle_conversation_selected(
     )
 }
 
+fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> String {
+    if let Some(item) = state
+        .session_list
+        .items
+        .iter()
+        .find(|item| item.channel_id == channel_id && item.channel_type == channel_type)
+        .filter(|item| !item.title.trim().is_empty())
+    {
+        return item.title.clone();
+    }
+
+    if let Some(detail) = &state.add_friend.detail {
+        let title = detail.title.trim();
+        if !title.is_empty() {
+            return title.to_string();
+        }
+    }
+
+    if let Some(selection) = state.add_friend.selected_panel_item {
+        return match selection {
+            AddFriendSelectionVm::Friend(user_id) | AddFriendSelectionVm::Request(user_id) => {
+                format!("UID {user_id}")
+            }
+            AddFriendSelectionVm::Group(group_id) => format!("群组 {group_id}"),
+        };
+    }
+
+    format!("会话 {}", channel_id)
+}
+
 fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device_id: String) {
     if !state.auth.username.trim().is_empty() {
         auth_prefs::save_last_username(&state.auth.username);
@@ -759,15 +1142,27 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     state.auth.device_id = device_id;
     state.auth.password.clear();
     state.overlay.settings_menu_open = false;
+    state.switch_account.add_account_login_mode = false;
+    // Bump session_epoch so the SDK event subscription hash changes, forcing
+    // Iced to tear down the old stream and create a fresh one with a new
+    // broadcast::Receiver. This ensures events from the new user's session
+    // are actually received.
+    state.session_epoch = state.session_epoch.wrapping_add(1);
     state.route = Route::SessionList;
 }
 
 fn apply_logout(state: &mut AppState) {
     state.overlay.settings_menu_open = false;
+    state.switch_account.loading = false;
+    state.switch_account.switching_uid = None;
+    state.switch_account.error = None;
+    state.switch_account.add_account_login_mode = false;
     state.active_chat = None;
     state.session_list.items.clear();
     state.session_list.load_error = None;
     state.session_list.total_unread_count = 0;
+    state.session_list.is_loading = false;
+    state.session_list.refresh_pending = false;
     state.add_friend.friends.clear();
     state.add_friend.groups.clear();
     state.add_friend.requests.clear();
@@ -785,7 +1180,32 @@ fn apply_logout(state: &mut AppState) {
     state.route = Route::Login;
 }
 
-fn schedule_session_list_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+fn resolve_switch_account_return_route(state: &AppState) -> Route {
+    match state.switch_account.return_route {
+        Route::SwitchAccount | Route::Login | Route::Splash => {
+            if state.active_chat.is_some() {
+                Route::Chat
+            } else {
+                Route::SessionList
+            }
+        }
+        ref route => route.clone(),
+    }
+}
+
+fn schedule_session_list_refresh(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    if state.session_list.is_loading {
+        // A load is already in-flight; coalesce by setting the pending flag.
+        // When the current load completes (SessionListLoaded/Failed) it will
+        // fire one more refresh to pick up any changes that arrived during the flight.
+        state.session_list.refresh_pending = true;
+        return Task::none();
+    }
+    state.session_list.is_loading = true;
+    state.session_list.refresh_pending = false;
     let bridge = Arc::clone(bridge);
     Task::perform(
         async move { bridge.load_session_list().await },
@@ -803,6 +1223,40 @@ fn schedule_total_unread_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage
         |result| match result {
             Ok(count) => AppMessage::TotalUnreadCountLoaded { count },
             Err(error) => AppMessage::TotalUnreadCountLoadFailed { error },
+        },
+    )
+}
+
+fn schedule_channel_sync_repair(
+    bridge: &Arc<dyn SdkBridge>,
+    channel_id: u64,
+    channel_type: i32,
+) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.sync_channel(channel_id, channel_type).await },
+        move |result| match result {
+            Ok(applied) => AppMessage::RepairChannelSyncSucceeded {
+                channel_id,
+                channel_type,
+                applied,
+            },
+            Err(error) => AppMessage::RepairChannelSyncFailed {
+                channel_id,
+                channel_type,
+                error,
+            },
+        },
+    )
+}
+
+fn schedule_local_accounts_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.list_local_accounts().await },
+        |result| match result {
+            Ok(accounts) => AppMessage::SwitchAccountListLoaded { accounts },
+            Err(error) => AppMessage::SwitchAccountListLoadFailed { error },
         },
     )
 }
@@ -929,6 +1383,13 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         }
         None => return Task::none(),
     };
+    if channel_id == 0 || channel_type <= 0 {
+        state.auth.error = Some(format!(
+            "发送失败: 无效会话参数 channel_id={} channel_type={}",
+            channel_id, channel_type
+        ));
+        return Task::none();
+    }
     let client_txn_id = match bridge.generate_local_message_id() {
         Ok(id) => id,
         Err(error) => {
@@ -1052,16 +1513,25 @@ fn handle_retry_send_pressed(
         },
         move |result| match result {
             Ok(()) => AppMessage::Noop,
-            Err(error) => AppMessage::TimelinePatched {
-                channel_id,
-                channel_type,
-                open_token,
-                revision: events::allocate_patch_revision(),
-                patch: TimelinePatchVm::UpdateSendState {
+            Err(error) => {
+                warn!(
+                    "retry_send failed: channel_id={} channel_type={} client_txn_id={} error={}",
+                    channel_id,
+                    channel_type,
                     client_txn_id,
-                    send_state: MessageSendStateVm::FailedRetryable { reason: error },
-                },
-            },
+                    format_ui_error(&error)
+                );
+                AppMessage::TimelinePatched {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    revision: events::allocate_patch_revision(),
+                    patch: TimelinePatchVm::UpdateSendState {
+                        client_txn_id,
+                        send_state: MessageSendStateVm::FailedRetryable { reason: error },
+                    },
+                }
+            }
         },
     )
 }
@@ -1119,13 +1589,20 @@ fn handle_timeline_updated_ingress(
                     }
                     return AppMessage::Noop;
                 }
-                let patch = match resolved_client_txn_id {
-                    Some(client_txn_id) => TimelinePatchVm::ReplaceLocalEcho {
-                        client_txn_id,
-                        remote,
-                    },
-                    None => TimelinePatchVm::UpsertRemote { remote },
+                let (patch, patch_kind) = match resolved_client_txn_id {
+                    Some(client_txn_id) => (
+                        TimelinePatchVm::ReplaceLocalEcho {
+                            client_txn_id,
+                            remote,
+                        },
+                        TimelinePatchKind::ReplaceLocalEcho,
+                    ),
+                    None => (
+                        TimelinePatchVm::UpsertRemote { remote },
+                        TimelinePatchKind::UpsertRemote,
+                    ),
                 };
+                reporting::report_timeline_patch(patch_kind, channel_id, channel_type);
 
                 AppMessage::TimelinePatched {
                     channel_id,
@@ -1146,6 +1623,140 @@ fn handle_timeline_updated_ingress(
             }
         },
     )
+}
+
+fn handle_global_message_ingress(
+    _state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    message_id: u64,
+    channel_id: Option<u64>,
+    channel_type: Option<i32>,
+    source: MessageIngressSource,
+) -> Task<AppMessage> {
+    reporting::report_message_ingress(source, message_id, channel_id, channel_type);
+
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.load_message_vm(message_id).await },
+        move |result| match result {
+            Ok(message) => AppMessage::GlobalMessageLoaded {
+                message_id,
+                channel_id,
+                channel_type,
+                source,
+                message,
+            },
+            Err(error) => AppMessage::GlobalMessageLoadFailed {
+                message_id,
+                channel_id,
+                channel_type,
+                source,
+                error,
+            },
+        },
+    )
+}
+
+fn handle_global_message_loaded(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    message_id: u64,
+    channel_id: Option<u64>,
+    channel_type: Option<i32>,
+    source: MessageIngressSource,
+    message: Option<MessageVm>,
+) -> Task<AppMessage> {
+    let Some(message) = message else {
+        reporting::report_message_missing(source, message_id, channel_id, channel_type);
+        return Task::batch([
+            schedule_session_list_refresh(state, bridge),
+            schedule_total_unread_refresh(bridge),
+        ]);
+    };
+
+    reporting::report_message_loaded(source, &message);
+    apply_global_message_to_active_chat(state, message);
+    Task::batch([
+        schedule_session_list_refresh(state, bridge),
+        schedule_total_unread_refresh(bridge),
+    ])
+}
+
+fn apply_global_message_to_active_chat(state: &mut AppState, remote: MessageVm) {
+    let Some(chat) = &mut state.active_chat else {
+        return;
+    };
+    if chat.channel_id != remote.channel_id || chat.channel_type != remote.channel_type {
+        return;
+    }
+
+    let incoming_server_message_id = remote.server_message_id;
+    let incoming_is_own = remote.is_own;
+    let existed_before = incoming_server_message_id
+        .map(|server_message_id| {
+            find_item_index_by_server_message_id(&chat.timeline.items, server_message_id).is_some()
+        })
+        .unwrap_or(false);
+
+    let resolved_client_txn_id = chat
+        .runtime_index
+        .client_txn_id_for_message(remote.message_id)
+        .or(remote.client_txn_id);
+
+    let applied = if remote.server_message_id.is_none() {
+        if let Some(client_txn_id) = resolved_client_txn_id {
+            if let Some(send_state) = remote.send_state.clone() {
+                if !matches!(send_state, MessageSendStateVm::Queued) {
+                    apply_update_send_state_patch(
+                        &mut chat.timeline.items,
+                        client_txn_id,
+                        send_state,
+                    )
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        let (patch, patch_kind) = match resolved_client_txn_id {
+            Some(client_txn_id) => (
+                TimelinePatchVm::ReplaceLocalEcho {
+                    client_txn_id,
+                    remote,
+                },
+                TimelinePatchKind::ReplaceLocalEcho,
+            ),
+            None => (
+                TimelinePatchVm::UpsertRemote { remote },
+                TimelinePatchKind::UpsertRemote,
+            ),
+        };
+        let applied = apply_timeline_patch(chat, patch);
+        if applied {
+            reporting::report_timeline_patch(patch_kind, chat.channel_id, chat.channel_type);
+        }
+        applied
+    };
+
+    if applied {
+        normalize_timeline_items(&mut chat.timeline.items);
+        chat.timeline.revision = events::allocate_patch_revision();
+        chat.runtime_index.rebuild_from_items(&chat.timeline.items);
+        if !chat.timeline.at_bottom && !incoming_is_own && !existed_before {
+            if let Some(server_message_id) = incoming_server_message_id {
+                if chat.unread_marker.first_unread_key.is_none() {
+                    chat.unread_marker.first_unread_key =
+                        Some(TimelineItemKey::Remote { server_message_id });
+                }
+                chat.unread_marker.unread_count = chat.unread_marker.unread_count.saturating_add(1);
+                chat.unread_marker.has_unread_below_viewport = true;
+            }
+        }
+    }
 }
 
 fn handle_load_older_triggered(
@@ -1198,7 +1809,6 @@ fn handle_viewport_changed(
     channel_type: i32,
     at_bottom: bool,
     near_top: bool,
-    first_visible_item: Option<TimelineItemKey>,
 ) -> Task<AppMessage> {
     let Some(chat) = &mut state.active_chat else {
         return Task::none();
@@ -1208,7 +1818,6 @@ fn handle_viewport_changed(
     }
 
     chat.timeline.at_bottom = at_bottom;
-    chat.timeline.first_visible_item = first_visible_item;
 
     if near_top {
         return handle_load_older_triggered(state, bridge, channel_id, channel_type);
@@ -1218,10 +1827,44 @@ fn handle_viewport_changed(
         return Task::none();
     }
 
-    let Some(last_read_pts) = latest_read_pts(&chat.timeline.items) else {
-        return Task::none();
-    };
+    let last_read_pts = latest_read_pts(&chat.timeline.items).unwrap_or(0);
+    clear_local_unread_for_channel(state, channel_id, channel_type);
+    schedule_mark_read_task(bridge, channel_id, channel_type, last_read_pts)
+}
 
+fn clear_local_unread_for_channel(state: &mut AppState, channel_id: u64, channel_type: i32) {
+    let mut cleared = 0_u32;
+    if let Some(item) = state
+        .session_list
+        .items
+        .iter_mut()
+        .find(|entry| entry.channel_id == channel_id && entry.channel_type == channel_type)
+    {
+        cleared = item.unread_count;
+        item.unread_count = 0;
+    }
+    if cleared > 0 {
+        state.session_list.total_unread_count = state
+            .session_list
+            .total_unread_count
+            .saturating_sub(cleared);
+    }
+
+    if let Some(chat) = &mut state.active_chat {
+        if chat.channel_id == channel_id && chat.channel_type == channel_type {
+            chat.unread_marker.first_unread_key = None;
+            chat.unread_marker.unread_count = 0;
+            chat.unread_marker.has_unread_below_viewport = false;
+        }
+    }
+}
+
+fn schedule_mark_read_task(
+    bridge: &Arc<dyn SdkBridge>,
+    channel_id: u64,
+    channel_type: i32,
+    last_read_pts: u64,
+) -> Task<AppMessage> {
     let bridge = Arc::clone(bridge);
     Task::perform(
         async move {
@@ -1229,9 +1872,26 @@ fn handle_viewport_changed(
                 .mark_read(channel_id, channel_type, last_read_pts)
                 .await
         },
-        |result| match result {
-            Ok(()) => AppMessage::RefreshTotalUnreadCount,
-            Err(_) => AppMessage::Noop,
+        move |result| match result {
+            Ok(()) => {
+                tracing::info!(
+                    "mark_read ok: channel_id={} channel_type={} last_read_pts={}",
+                    channel_id,
+                    channel_type,
+                    last_read_pts
+                );
+                AppMessage::RefreshTotalUnreadCount
+            }
+            Err(error) => {
+                warn!(
+                    "mark_read failed: channel_id={} channel_type={} last_read_pts={} error={}",
+                    channel_id,
+                    channel_type,
+                    last_read_pts,
+                    format_ui_error(&error)
+                );
+                AppMessage::Noop
+            }
         },
     )
 }
@@ -1292,7 +1952,7 @@ fn prepend_history_items(current: &mut Vec<MessageVm>, incoming: Vec<MessageVm>)
 }
 
 fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> bool {
-    match patch {
+    let applied = match patch {
         TimelinePatchVm::ReplaceLocalEcho {
             client_txn_id,
             mut remote,
@@ -1355,7 +2015,33 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
             chat.unread_marker = unread_marker;
             true
         }
+    };
+
+    if applied {
+        normalize_timeline_items(&mut chat.timeline.items);
     }
+    applied
+}
+
+fn normalize_timeline_items(items: &mut [MessageVm]) {
+    items.sort_by_key(timeline_order_key);
+}
+
+fn timeline_order_key(item: &MessageVm) -> (u8, u64, i64, u64, u64) {
+    let tier = if item.pts.is_some() {
+        0_u8
+    } else if item.server_message_id.is_some() {
+        1_u8
+    } else {
+        2_u8
+    };
+    (
+        tier,
+        item.pts.unwrap_or(u64::MAX),
+        item.created_at,
+        item.server_message_id.unwrap_or(u64::MAX),
+        item.message_id,
+    )
 }
 
 fn apply_update_send_state_patch(
@@ -1484,7 +2170,7 @@ mod tests {
     use privchat_sdk::SdkEvent;
 
     use super::update;
-    use crate::app::message::AppMessage;
+    use crate::app::message::{AppMessage, MessageIngressSource};
     use crate::app::route::Route;
     use crate::app::state::{
         AppState, ChatScreenState, ComposerState, RuntimeMessageIndex, TimelineState,
@@ -1517,6 +2203,27 @@ mod tests {
 
         async fn load_total_unread_count(&self, _exclude_muted: bool) -> Result<u32, UiError> {
             Ok(0)
+        }
+
+        async fn sync_channel(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+        ) -> Result<usize, UiError> {
+            Ok(0)
+        }
+
+        async fn list_local_accounts(
+            &self,
+        ) -> Result<Vec<crate::presentation::vm::LocalAccountVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn switch_to_local_account(
+            &self,
+            _uid: String,
+        ) -> Result<crate::presentation::vm::LoginSessionVm, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
         }
 
         async fn logout(&self) -> Result<(), UiError> {
@@ -1561,6 +2268,13 @@ mod tests {
             &self,
             _item: crate::presentation::vm::AddFriendSelectionVm,
         ) -> Result<crate::presentation::vm::AddFriendDetailVm, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn get_or_create_direct_channel(
+            &self,
+            _target_user_id: u64,
+        ) -> Result<(u64, i32), UiError> {
             Err(UiError::Unknown("unused".to_string()))
         }
 
@@ -1624,7 +2338,7 @@ mod tests {
             Ok(())
         }
 
-        fn subscribe_timeline(&self) -> Subscription<SdkEvent> {
+        fn subscribe_timeline(&self, _session_epoch: u64) -> Subscription<SdkEvent> {
             Subscription::none()
         }
     }
@@ -1635,6 +2349,7 @@ mod tests {
         state.active_chat = Some(ChatScreenState {
             channel_id: 100,
             channel_type: 2,
+            title: "测试会话".to_string(),
             open_token: 1,
             timeline: TimelineState::default(),
             runtime_index: RuntimeMessageIndex::default(),
@@ -1659,6 +2374,31 @@ mod tests {
             pts: None,
             send_state: Some(MessageSendStateVm::Queued),
             is_own: true,
+            is_deleted: false,
+        }
+    }
+
+    fn remote_message(
+        message_id: u64,
+        server_message_id: u64,
+        created_at: i64,
+        pts: u64,
+        body: &str,
+    ) -> MessageVm {
+        MessageVm {
+            key: TimelineItemKey::Remote { server_message_id },
+            channel_id: 100,
+            channel_type: 2,
+            message_id,
+            server_message_id: Some(server_message_id),
+            client_txn_id: None,
+            from_uid: 42,
+            body: body.to_string(),
+            message_type: 1,
+            created_at,
+            pts: Some(pts),
+            send_state: None,
+            is_own: false,
             is_deleted: false,
         }
     }
@@ -1841,6 +2581,86 @@ mod tests {
         assert_eq!(chat.timeline.items.len(), 1);
         assert_eq!(chat.timeline.items[0].server_message_id, Some(888));
         assert_eq!(chat.timeline.revision, 1);
+    }
+
+    #[test]
+    fn global_message_loaded_keeps_timeline_ordered_even_if_arrival_is_reversed() {
+        let mut state = base_state();
+        let bridge: Arc<dyn SdkBridge> = Arc::new(StubBridge);
+
+        let _ = update(
+            &mut state,
+            AppMessage::GlobalMessageLoaded {
+                message_id: 3003,
+                channel_id: Some(100),
+                channel_type: Some(2),
+                source: MessageIngressSource::TimelineUpdated,
+                message: Some(remote_message(3003, 503, 1000, 53, "3")),
+            },
+            &bridge,
+        );
+        let _ = update(
+            &mut state,
+            AppMessage::GlobalMessageLoaded {
+                message_id: 3002,
+                channel_id: Some(100),
+                channel_type: Some(2),
+                source: MessageIngressSource::TimelineUpdated,
+                message: Some(remote_message(3002, 502, 1000, 52, "2")),
+            },
+            &bridge,
+        );
+        let _ = update(
+            &mut state,
+            AppMessage::GlobalMessageLoaded {
+                message_id: 3001,
+                channel_id: Some(100),
+                channel_type: Some(2),
+                source: MessageIngressSource::TimelineUpdated,
+                message: Some(remote_message(3001, 501, 1000, 51, "1")),
+            },
+            &bridge,
+        );
+
+        let chat = state.active_chat.as_ref().expect("chat");
+        let bodies: Vec<&str> = chat
+            .timeline
+            .items
+            .iter()
+            .map(|item| item.body.as_str())
+            .collect();
+        assert_eq!(bodies, vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn global_incoming_message_increments_unread_when_not_at_bottom() {
+        let mut state = base_state();
+        let bridge: Arc<dyn SdkBridge> = Arc::new(StubBridge);
+        if let Some(chat) = &mut state.active_chat {
+            chat.timeline.at_bottom = false;
+        }
+
+        let _ = update(
+            &mut state,
+            AppMessage::GlobalMessageLoaded {
+                message_id: 4101,
+                channel_id: Some(100),
+                channel_type: Some(2),
+                source: MessageIngressSource::SubscriptionMessageReceived,
+                message: Some(remote_message(4101, 901, 2000, 901, "hello")),
+            },
+            &bridge,
+        );
+
+        let chat = state.active_chat.as_ref().expect("chat");
+        assert_eq!(chat.unread_marker.unread_count, 1);
+        assert!(chat.unread_marker.has_unread_below_viewport);
+        assert_eq!(
+            chat.unread_marker.first_unread_key,
+            Some(TimelineItemKey::Remote {
+                server_message_id: 901
+            })
+        );
     }
 
     #[test]
