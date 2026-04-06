@@ -25,7 +25,20 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
 
     let send_enabled = !composer.sending_disabled && !composer.draft.trim().is_empty();
     let editor = text_editor(&composer.editor)
+        .id("chat-composer-editor")
         .placeholder("输入消息")
+        .key_binding(|key_press| {
+            use iced::keyboard::{key, Key};
+            if matches!(key_press.key.as_ref(), Key::Named(key::Named::Enter)) {
+                if key_press.modifiers.shift() {
+                    Some(text_editor::Binding::Enter)
+                } else {
+                    Some(text_editor::Binding::Custom(AppMessage::SendPressed))
+                }
+            } else {
+                text_editor::Binding::from_key_press(key_press)
+            }
+        })
         .on_action(|action| AppMessage::ComposerEdited { action })
         .padding([8, 0])
         .size(16)

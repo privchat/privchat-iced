@@ -483,9 +483,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::SwitchAccountSucceeded { uid, session } => {
+        AppMessage::SwitchAccountSucceeded { uid: _, session } => {
             apply_logout(state);
-            state.auth.username = uid;
+            // Keep the username as the login identifier the user entered.
+            // Do not force it to local numeric uid after account switch.
             apply_login_success(state, session.user_id, session.token, session.device_id);
             state.switch_account.loading = false;
             state.switch_account.switching_uid = None;

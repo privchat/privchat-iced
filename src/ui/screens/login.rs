@@ -59,8 +59,8 @@ pub fn view(auth: &AuthState, add_account_mode: bool) -> Element<'_, AppMessage>
     if let Some(error) = &auth.error {
         content = content.push(text(error));
     }
-    if let Some(user_id) = auth.user_id {
-        content = content.push(text(format!("Logged in as user_id={user_id}")).size(12));
+    if auth.user_id.is_some() && !auth.username.trim().is_empty() {
+        content = content.push(text(format!("Logged in as {}", auth.username.trim())).size(12));
     }
 
     container(content.padding(16).max_width(520))

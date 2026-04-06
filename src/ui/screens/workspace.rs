@@ -107,7 +107,7 @@ fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
         matches!(state.route, Route::Settings) || state.overlay.settings_menu_open;
 
     let top = column![
-        avatar_chip(state.auth.user_id),
+        avatar_chip(&state.auth.username),
         nav_icon(
             Icon::Message,
             message_active,
@@ -145,13 +145,16 @@ fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
     .into()
 }
 
-fn avatar_chip(user_id: Option<u64>) -> Element<'static, AppMessage> {
-    let label = user_id
-        .map(|id| format!("{:02}", id % 100))
-        .unwrap_or_else(|| "ME".to_string());
+fn avatar_chip(username: &str) -> Element<'static, AppMessage> {
+    let label = username
+        .trim()
+        .chars()
+        .next()
+        .map(|ch| ch.to_uppercase().to_string())
+        .unwrap_or_else(|| "M".to_string());
     container(
         text(label)
-            .size(12)
+            .size(18)
             .color(Color::from_rgb8(0xE9, 0xEE, 0xF5)),
     )
     .width(Length::Fixed(42.0))
