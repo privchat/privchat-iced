@@ -781,27 +781,76 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::AddFriendDetailAddFriendPressed { user_id } => {
+        AppMessage::AddFriendDetailAcceptRequestPressed { user_id } => {
             let already_friend = state
                 .add_friend
                 .friends
                 .iter()
                 .any(|friend| friend.user_id == user_id);
             if already_friend {
-                state.add_friend.feedback = Some("该用户已是好友".to_string());
-                return Task::none();
+                state.add_friend.feedback = Some("该用户已是好友，正在打开会话...".to_string());
+                return Task::batch([
+                    schedule_add_friend_refresh(bridge),
+                    Task::perform(
+                        {
+                            let bridge = Arc::clone(bridge);
+                            async move { bridge.get_or_create_direct_channel(user_id).await }
+                        },
+                        move |result| match result {
+                            Ok((channel_id, channel_type)) => {
+                                AppMessage::AddFriendOpenConversationResolved {
+                                    user_id,
+                                    channel_id,
+                                    channel_type,
+                                }
+                            }
+                            Err(error) => {
+                                AppMessage::AddFriendOpenConversationFailed { user_id, error }
+                            }
+                        },
+                    ),
+                ]);
             }
 
-            state.add_friend.feedback = Some("发送好友申请中...".to_string());
+            state.add_friend.feedback = Some("同意好友申请中...".to_string());
 
             let bridge = Arc::clone(bridge);
             Task::perform(
-                async move { bridge.send_friend_request(user_id, None, None).await },
-                |result| match result {
-                    Ok(user_id) => AppMessage::AddFriendRequestSucceeded { user_id },
-                    Err(error) => AppMessage::AddFriendRequestFailed { error },
+                async move { bridge.accept_friend_request(user_id).await },
+                move |result| match result {
+                    Ok(user_id) => AppMessage::AddFriendAcceptSucceeded { user_id },
+                    Err(error) => AppMessage::AddFriendAcceptFailed { user_id, error },
                 },
             )
+        }
+
+        AppMessage::AddFriendAcceptSucceeded { user_id } => {
+            state.add_friend.feedback = Some("已同意好友申请，正在打开会话...".to_string());
+            Task::batch([
+                schedule_add_friend_refresh(bridge),
+                Task::perform(
+                    {
+                        let bridge = Arc::clone(bridge);
+                        async move { bridge.get_or_create_direct_channel(user_id).await }
+                    },
+                    move |result| match result {
+                        Ok((channel_id, channel_type)) => AppMessage::AddFriendOpenConversationResolved {
+                            user_id,
+                            channel_id,
+                            channel_type,
+                        },
+                        Err(error) => AppMessage::AddFriendOpenConversationFailed { user_id, error },
+                    },
+                ),
+            ])
+        }
+
+        AppMessage::AddFriendAcceptFailed { user_id, error } => {
+            state.add_friend.detail_error = Some(format!(
+                "同意 {user_id} 的好友申请失败: {}",
+                format_ui_error(&error)
+            ));
+            Task::none()
         }
 
         AppMessage::ToggleNewFriendsSection => {
@@ -1525,6 +1574,17 @@ fn handle_conversation_selected(
 }
 
 fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> String {
+    // When jumping from AddFriend detail, prefer the selected profile title so
+    // we don't briefly flash a raw UID before session list refresh catches up.
+    if matches!(state.route, Route::AddFriend) {
+        if let Some(detail) = &state.add_friend.detail {
+            let title = detail.title.trim();
+            if !title.is_empty() {
+                return title.to_string();
+            }
+        }
+    }
+
     if let Some(item) = state
         .session_list
         .items
@@ -1533,13 +1593,6 @@ fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> S
         .filter(|item| !item.title.trim().is_empty())
     {
         return item.title.clone();
-    }
-
-    if let Some(detail) = &state.add_friend.detail {
-        let title = detail.title.trim();
-        if !title.is_empty() {
-            return title.to_string();
-        }
     }
 
     if let Some(selection) = state.add_friend.selected_panel_item {
@@ -2736,7 +2789,9 @@ fn schedule_thumbnail_download_for_message(
         return None;
     }
     if let Some(local_path) = item.media_local_path.as_ref() {
-        if Path::new(local_path).exists() {
+        // Keep "thumbnail first" UX, but if current local is only a thumbnail,
+        // continue downloading the original image in background.
+        if Path::new(local_path).exists() && !is_thumbnail_local_path(local_path) {
             return None;
         }
     }
@@ -2748,7 +2803,7 @@ fn schedule_thumbnail_download_for_message(
 
     let bridge = Arc::clone(bridge);
     let message_id = item.message_id;
-    let target_path = media_thumbnail_cache_path(
+    let target_path = media_image_cache_path(
         user_id,
         item.created_at,
         message_id,
@@ -2843,6 +2898,33 @@ fn media_thumbnail_cache_path(
         .join(yyyymm)
         .join(message_id.to_string())
         .join(format!("thumb.{extension}"))
+}
+
+fn media_image_cache_path(
+    user_id: u64,
+    created_at_ms: i64,
+    message_id: u64,
+    media_url: &str,
+) -> PathBuf {
+    let yyyymm = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(created_at_ms)
+        .map(|dt| dt.format("%Y%m").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y%m").to_string());
+    let extension = infer_file_extension(media_url);
+    media_data_root()
+        .join("users")
+        .join(user_id.to_string())
+        .join("files")
+        .join(yyyymm)
+        .join(message_id.to_string())
+        .join(format!("image.{extension}"))
+}
+
+fn is_thumbnail_local_path(path: &str) -> bool {
+    Path::new(path)
+        .file_name()
+        .and_then(|v| v.to_str())
+        .map(|name| name.to_ascii_lowercase().starts_with("thumb."))
+        .unwrap_or(false)
 }
 
 fn media_data_root() -> PathBuf {
@@ -3047,6 +3129,10 @@ mod tests {
             _remark: Option<String>,
             _search_session_id: Option<u64>,
         ) -> Result<u64, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn accept_friend_request(&self, _from_user_id: u64) -> Result<u64, UiError> {
             Err(UiError::Unknown("unused".to_string()))
         }
 

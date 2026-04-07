@@ -9,12 +9,13 @@ use iced::Subscription;
 use privchat_protocol::message::ContentMessageType;
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
-    AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendApplyRequest,
-    FriendApplyResponse, FriendPendingRequest, FriendPendingResponse, GetChannelPtsRequest,
-    GetChannelPtsResponse, GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse,
-    MessageStatusReadPtsRequest, MessageStatusReadPtsResponse,
+    AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
+    FriendAcceptResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
+    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse,
+    GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
+    MessageStatusReadPtsResponse,
 };
-use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredFriend};
+use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::app::reporting::{self, MarkReadPtsSource};
@@ -78,6 +79,42 @@ fn field(label: &str, value: impl Into<String>) -> AddFriendDetailFieldVm {
     }
 }
 
+fn format_datetime_ms(timestamp_ms: u64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms as i64)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|| timestamp_ms.to_string())
+}
+
+fn parse_u64_text(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || !trimmed.chars().all(|ch| ch.is_ascii_digit()) {
+        return None;
+    }
+    trimmed.parse::<u64>().ok()
+}
+
+fn infer_direct_peer_user_id(
+    channel: &StoredChannel,
+    mapped_title: &str,
+    current_uid: Option<u64>,
+) -> Option<u64> {
+    if channel.channel_type != 1 {
+        return None;
+    }
+    [
+        parse_u64_text(&channel.channel_remark),
+        parse_u64_text(&channel.channel_name),
+        parse_u64_text(mapped_title),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|user_id| Some(*user_id) != current_uid)
+}
+
 const TEXT_MESSAGE_TYPE: i32 = ContentMessageType::Text as i32;
 const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
@@ -102,6 +139,7 @@ pub trait SdkBridge: Send + Sync + 'static {
         remark: Option<String>,
         search_session_id: Option<u64>,
     ) -> Result<u64, UiError>;
+    async fn accept_friend_request(&self, from_user_id: u64) -> Result<u64, UiError>;
     async fn load_friend_list(&self) -> Result<Vec<FriendListItemVm>, UiError>;
     async fn load_group_list(&self) -> Result<Vec<GroupListItemVm>, UiError>;
     async fn load_friend_request_list(&self) -> Result<Vec<FriendRequestItemVm>, UiError>;
@@ -478,6 +516,7 @@ impl SdkBridge for PrivchatSdkBridge {
             .list_channels(300, 0)
             .await
             .map_err(map_sdk_error)?;
+        let current_uid = self.current_uid().await?;
         let bootstrap_completed = self.sdk.is_bootstrap_completed().await.unwrap_or(false);
         let unread_snapshot = channels
             .iter()
@@ -496,10 +535,29 @@ impl SdkBridge for PrivchatSdkBridge {
             unread_snapshot
         );
 
-        Ok(channels
-            .iter()
-            .map(adapter::map_channel_to_session_item)
-            .collect())
+        let mut items = Vec::with_capacity(channels.len());
+        for channel in &channels {
+            let mut item = adapter::map_channel_to_session_item(channel);
+            if let Some(peer_user_id) = infer_direct_peer_user_id(channel, &item.title, current_uid)
+            {
+                if let Some(user) = self
+                    .sdk
+                    .get_user_by_id(peer_user_id)
+                    .await
+                    .map_err(map_sdk_error)?
+                {
+                    item.title = choose_display_name(
+                        user.alias.as_deref(),
+                        user.nickname.as_deref(),
+                        user.username.as_deref(),
+                        item.title.clone(),
+                    );
+                }
+            }
+            items.push(item);
+        }
+
+        Ok(items)
     }
 
     async fn load_total_unread_count(&self, exclude_muted: bool) -> Result<u32, UiError> {
@@ -677,6 +735,30 @@ impl SdkBridge for PrivchatSdkBridge {
 
         items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         Ok(items)
+    }
+
+    async fn accept_friend_request(&self, from_user_id: u64) -> Result<u64, UiError> {
+        tracing::info!(
+            "add_friend.accept_friend_request: from_user_id={}",
+            from_user_id
+        );
+        let channel_id: FriendAcceptResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::friend::ACCEPT,
+                &FriendAcceptRequest {
+                    from_user_id,
+                    message: None,
+                    target_user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        tracing::info!(
+            "add_friend.accept_friend_request: created_channel_id={}",
+            channel_id
+        );
+        Ok(from_user_id)
     }
 
     async fn load_active_username(&self) -> Result<String, UiError> {
@@ -880,7 +962,7 @@ impl SdkBridge for PrivchatSdkBridge {
                     {
                         fields.push(field("申请消息", message));
                     }
-                    fields.push(field("申请时间", request.created_at.to_string()));
+                    fields.push(field("申请时间", format_datetime_ms(request.created_at)));
                 }
 
                 Ok(AddFriendDetailVm {

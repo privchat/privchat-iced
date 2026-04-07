@@ -213,14 +213,14 @@ pub fn detail_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
 #[derive(Debug, Clone, Copy)]
 enum DetailPrimaryAction {
     SendMessage { user_id: u64 },
-    AddFriend { user_id: u64 },
+    AcceptFriendRequest { user_id: u64 },
 }
 
 impl DetailPrimaryAction {
     fn label(self) -> &'static str {
         match self {
             Self::SendMessage { .. } => "发送消息",
-            Self::AddFriend { .. } => "添加好友",
+            Self::AcceptFriendRequest { .. } => "同意好友申请",
         }
     }
 
@@ -229,7 +229,9 @@ impl DetailPrimaryAction {
             Self::SendMessage { user_id } => {
                 AppMessage::AddFriendDetailSendMessagePressed { user_id }
             }
-            Self::AddFriend { user_id } => AppMessage::AddFriendDetailAddFriendPressed { user_id },
+            Self::AcceptFriendRequest { user_id } => {
+                AppMessage::AddFriendDetailAcceptRequestPressed { user_id }
+            }
         }
     }
 }
@@ -249,7 +251,7 @@ fn detail_primary_action(state: &AddFriendState) -> Option<DetailPrimaryAction> 
             if is_added {
                 Some(DetailPrimaryAction::SendMessage { user_id })
             } else {
-                Some(DetailPrimaryAction::AddFriend { user_id })
+                Some(DetailPrimaryAction::AcceptFriendRequest { user_id })
             }
         }
         _ => None,

@@ -279,8 +279,15 @@ pub enum AppMessage {
         user_id: u64,
         error: UiError,
     },
-    AddFriendDetailAddFriendPressed {
+    AddFriendDetailAcceptRequestPressed {
         user_id: u64,
+    },
+    AddFriendAcceptSucceeded {
+        user_id: u64,
+    },
+    AddFriendAcceptFailed {
+        user_id: u64,
+        error: UiError,
     },
     ToggleNewFriendsSection,
     ToggleGroupSection,

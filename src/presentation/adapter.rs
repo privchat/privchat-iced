@@ -249,7 +249,9 @@ fn resolve_local_media_path(
     let yyyymm = yyyymm_from_timestamp_ms(created_at);
     let mut candidate_dir_names = vec![message_id.to_string()];
     if let Some(meta) = metadata {
-        for key in ["thumbnail_file_id", "file_id"] {
+        // Canonical priority: always resolve original file id first.
+        // Thumbnail id is only a fallback for legacy rows.
+        for key in ["file_id", "thumbnail_file_id"] {
             let id = meta.get(key).and_then(|v| {
                 v.as_u64()
                     .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
@@ -387,19 +389,9 @@ fn extract_media_info(
         .filter(|v| !v.trim().is_empty());
     let file_id_from_metadata = metadata
         .and_then(|m| {
-            m.get("thumbnail_file_id").and_then(|v| {
+            m.get("file_id").and_then(|v| {
                 v.as_u64()
                     .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-            })
-        })
-        .or_else(|| typed_file_meta.as_ref().map(|m| m.file_id))
-        .or_else(|| typed_image_meta.as_ref().map(|m| m.file_id))
-        .or_else(|| {
-            metadata.and_then(|m| {
-                m.get("file_id").and_then(|v| {
-                    v.as_u64()
-                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-                })
             })
         })
         .or_else(|| {
@@ -410,6 +402,16 @@ fn extract_media_info(
                         v.as_u64()
                             .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
                     })
+            })
+        })
+        .or_else(|| typed_image_meta.as_ref().map(|m| m.file_id))
+        .or_else(|| typed_file_meta.as_ref().map(|m| m.file_id))
+        .or_else(|| {
+            metadata.and_then(|m| {
+                m.get("thumbnail_file_id").and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
             })
         });
     let resolved_url = direct_url.or_else(|| {
