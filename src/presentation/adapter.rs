@@ -366,9 +366,6 @@ fn extract_media_info(
                 .map(str::to_string)
         });
 
-    let file_base_url = std::env::var("PRIVCHAT_FILE_BASE_URL")
-        .ok()
-        .filter(|v| !v.trim().is_empty());
     let file_id_from_metadata = metadata
         .and_then(|m| {
             m.get("file_id").and_then(|v| {
@@ -396,12 +393,9 @@ fn extract_media_info(
                 })
             })
         });
-    let resolved_url = direct_url.or_else(|| {
-        file_base_url
-            .as_ref()
-            .zip(file_id_from_metadata)
-            .map(|(base, id)| format!("{base}/api/app/files/{id}"))
-    });
+    // Deprecated path policy: never synthesize media URL by hardcoded endpoint templates.
+    // URL must come from payload metadata or runtime RPC (file/get_url).
+    let resolved_url = direct_url;
 
     let local_path = resolve_local_media_path(&body, metadata, current_uid, message_id, created_at);
     (local_path, resolved_url, file_id_from_metadata)
