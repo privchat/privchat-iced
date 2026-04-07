@@ -250,7 +250,7 @@ pub struct ChatScreenState {
 pub struct AttachmentMenuState {
     pub message_id: u64,
     pub local_path: Option<String>,
-    pub remote_url: Option<String>,
+    pub file_id: Option<u64>,
     pub filename: String,
 }
 

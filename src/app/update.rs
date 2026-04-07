@@ -968,30 +968,53 @@ pub fn update(
         }
 
         AppMessage::OpenAttachment {
+            message_id: _,
             local_path,
-            remote_url,
+            file_id,
             filename,
-        } => Task::perform(
-            async move {
-                let path =
-                    ensure_attachment_local_path(local_path, remote_url, filename, None).await?;
-                open_with_system(&path)?;
-                Ok(path)
-            },
-            |result| AppMessage::AttachmentOpenResolved { result },
-        ),
+        } => {
+            if let Some(local) = local_path {
+                let path = Path::new(&local);
+                if path.exists() {
+                    return match open_with_system(&local) {
+                        Ok(()) => Task::none(),
+                        Err(error) => {
+                            Task::done(AppMessage::AttachmentOpenResolved { result: Err(error) })
+                        }
+                    };
+                }
+            }
+            let Some(file_id) = file_id else {
+                return Task::done(AppMessage::AttachmentOpenResolved {
+                    result: Err(crate::presentation::vm::UiError::Unknown(
+                        "attachment file_id missing".to_string(),
+                    )),
+                });
+            };
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    let url = bridge.get_file_url(file_id).await?;
+                    let path =
+                        ensure_attachment_local_path(None, Some(url), filename, None).await?;
+                    open_with_system(&path)?;
+                    Ok(path)
+                },
+                |result| AppMessage::AttachmentOpenResolved { result },
+            )
+        }
 
         AppMessage::ShowAttachmentMenu {
             message_id,
             local_path,
-            remote_url,
+            file_id,
             filename,
         } => {
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
                     local_path,
-                    remote_url,
+                    file_id,
                     filename,
                 });
             }
@@ -1014,20 +1037,39 @@ pub fn update(
                 chat.attachment_menu = None;
             }
             match menu {
-                Some(menu) => Task::perform(
-                    async move {
-                        let path = ensure_attachment_local_path(
-                            menu.local_path,
-                            menu.remote_url,
-                            Some(menu.filename),
-                            None,
-                        )
-                        .await?;
-                        open_with_system(&path)?;
-                        Ok(path)
-                    },
-                    |result| AppMessage::AttachmentOpenResolved { result },
-                ),
+                Some(menu) => {
+                    if let Some(local) = menu.local_path {
+                        let path = Path::new(&local);
+                        if path.exists() {
+                            return match open_with_system(&local) {
+                                Ok(()) => Task::none(),
+                                Err(error) => Task::done(AppMessage::AttachmentOpenResolved {
+                                    result: Err(error),
+                                }),
+                            };
+                        }
+                    }
+                    let Some(file_id) = menu.file_id else {
+                        return Task::done(AppMessage::AttachmentOpenResolved {
+                            result: Err(crate::presentation::vm::UiError::Unknown(
+                                "attachment file_id missing".to_string(),
+                            )),
+                        });
+                    };
+                    let bridge = Arc::clone(bridge);
+                    let filename = menu.filename;
+                    Task::perform(
+                        async move {
+                            let url = bridge.get_file_url(file_id).await?;
+                            let path =
+                                ensure_attachment_local_path(None, Some(url), Some(filename), None)
+                                    .await?;
+                            open_with_system(&path)?;
+                            Ok(path)
+                        },
+                        |result| AppMessage::AttachmentOpenResolved { result },
+                    )
+                }
                 None => Task::none(),
             }
         }
@@ -1041,24 +1083,49 @@ pub fn update(
                 chat.attachment_menu = None;
             }
             match menu {
-                Some(menu) => Task::perform(
-                    async move {
-                        let path = ensure_attachment_local_path(
-                            menu.local_path,
-                            menu.remote_url,
-                            Some(menu.filename),
-                            None,
-                        )
-                        .await?;
-                        let parent = Path::new(&path)
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string())
-                            .unwrap_or(path.clone());
-                        open_with_system(&parent)?;
-                        Ok(parent)
-                    },
-                    |result| AppMessage::AttachmentOpenFolderResolved { result },
-                ),
+                Some(menu) => {
+                    if let Some(local) = menu.local_path {
+                        let path = Path::new(&local);
+                        if path.exists() {
+                            let parent = path
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or(local);
+                            return match open_with_system(&parent) {
+                                Ok(()) => Task::none(),
+                                Err(error) => {
+                                    Task::done(AppMessage::AttachmentOpenFolderResolved {
+                                        result: Err(error),
+                                    })
+                                }
+                            };
+                        }
+                    }
+                    let Some(file_id) = menu.file_id else {
+                        return Task::done(AppMessage::AttachmentOpenFolderResolved {
+                            result: Err(crate::presentation::vm::UiError::Unknown(
+                                "attachment file_id missing".to_string(),
+                            )),
+                        });
+                    };
+                    let bridge = Arc::clone(bridge);
+                    let filename = menu.filename;
+                    Task::perform(
+                        async move {
+                            let url = bridge.get_file_url(file_id).await?;
+                            let path =
+                                ensure_attachment_local_path(None, Some(url), Some(filename), None)
+                                    .await?;
+                            let parent = Path::new(&path)
+                                .parent()
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or(path.clone());
+                            open_with_system(&parent)?;
+                            Ok(parent)
+                        },
+                        |result| AppMessage::AttachmentOpenFolderResolved { result },
+                    )
+                }
                 None => Task::none(),
             }
         }
@@ -1073,9 +1140,10 @@ pub fn update(
             }
             match menu {
                 Some(menu) => {
+                    let message_id = menu.message_id;
                     let local_path = menu.local_path;
-                    let remote_url = menu.remote_url;
-                    let filename = menu.filename;
+                    let file_id = menu.file_id;
+                    let filename = menu.filename.clone();
                     let dialog_filename = filename.clone();
                     Task::perform(
                         async move {
@@ -1085,8 +1153,9 @@ pub fn update(
                                 .map(|path| path.to_string_lossy().to_string())
                         },
                         move |save_path| AppMessage::AttachmentSaveAsSelected {
+                            message_id,
                             local_path,
-                            remote_url,
+                            file_id,
                             filename,
                             save_path,
                         },
@@ -1097,24 +1166,51 @@ pub fn update(
         }
 
         AppMessage::AttachmentSaveAsSelected {
+            message_id: _,
             local_path,
-            remote_url,
+            file_id,
             filename,
             save_path,
         } => match save_path {
-            Some(path) => Task::perform(
-                async move {
-                    let saved = ensure_attachment_local_path(
-                        local_path,
-                        remote_url,
-                        Some(filename),
-                        Some(path),
-                    )
-                    .await?;
-                    Ok(saved)
-                },
-                |result| AppMessage::AttachmentSaveAsResolved { result },
-            ),
+            Some(path) => {
+                if let Some(local) = local_path {
+                    let src = Path::new(&local);
+                    if src.exists() {
+                        return match fs::copy(src, &path) {
+                            Ok(_) => Task::done(AppMessage::AttachmentSaveAsResolved {
+                                result: Ok(path),
+                            }),
+                            Err(error) => Task::done(AppMessage::AttachmentSaveAsResolved {
+                                result: Err(crate::presentation::vm::UiError::Unknown(format!(
+                                    "copy failed: {error}"
+                                ))),
+                            }),
+                        };
+                    }
+                }
+                let Some(file_id) = file_id else {
+                    return Task::done(AppMessage::AttachmentSaveAsResolved {
+                        result: Err(crate::presentation::vm::UiError::Unknown(
+                            "attachment file_id missing".to_string(),
+                        )),
+                    });
+                };
+                let bridge = Arc::clone(bridge);
+                Task::perform(
+                    async move {
+                        let url = bridge.get_file_url(file_id).await?;
+                        let saved = ensure_attachment_local_path(
+                            None,
+                            Some(url),
+                            Some(filename),
+                            Some(path),
+                        )
+                        .await?;
+                        Ok(saved)
+                    },
+                    |result| AppMessage::AttachmentSaveAsResolved { result },
+                )
+            }
             None => Task::none(),
         },
 

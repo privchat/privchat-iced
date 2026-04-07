@@ -83,39 +83,42 @@ pub fn view(
     };
 
     let content: Element<'_, AppMessage> = if message.message_type == IMAGE_MESSAGE_TYPE {
-        if render_media_preview && (message.media_local_path.is_some() || message.media_url.is_some()) {
-            let preview: Element<'_, AppMessage> = if let Some(local_path) = &message.media_local_path
-            {
-                image(local_path.clone())
+        if render_media_preview
+            && (message.media_local_path.is_some() || message.media_url.is_some())
+        {
+            let preview: Element<'_, AppMessage> =
+                if let Some(local_path) = &message.media_local_path {
+                    image(local_path.clone())
+                        .width(Length::Fixed(220.0))
+                        .height(Length::Fixed(160.0))
+                        .content_fit(iced::ContentFit::Cover)
+                        .into()
+                } else {
+                    container(
+                        text(&message.body)
+                            .size(14)
+                            .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
+                    )
                     .width(Length::Fixed(220.0))
-                    .height(Length::Fixed(160.0))
-                    .content_fit(iced::ContentFit::Cover)
+                    .height(Length::Fixed(80.0))
+                    .align_x(alignment::Horizontal::Center)
+                    .align_y(alignment::Vertical::Center)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
+                        border: border::rounded(8.0),
+                        ..container::Style::default()
+                    })
                     .into()
-            } else {
-                container(
-                    text(&message.body)
-                        .size(14)
-                        .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
-                )
-                .width(Length::Fixed(220.0))
-                .height(Length::Fixed(80.0))
-                .align_x(alignment::Horizontal::Center)
-                .align_y(alignment::Vertical::Center)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
-                    border: border::rounded(8.0),
-                    ..container::Style::default()
+                };
+            button(preview)
+                .style(navless_button_style)
+                .on_press(AppMessage::OpenAttachment {
+                    message_id: message.message_id,
+                    local_path: message.media_local_path.clone(),
+                    file_id: message.media_file_id,
+                    filename: Some(message.body.clone()),
                 })
                 .into()
-            };
-            button(preview)
-            .style(navless_button_style)
-            .on_press(AppMessage::OpenAttachment {
-                local_path: message.media_local_path.clone(),
-                remote_url: message.media_url.clone(),
-                filename: Some(message.body.clone()),
-            })
-            .into()
         } else if message.media_local_path.is_some() || message.media_url.is_some() {
             container(
                 text("[图片]")
@@ -148,8 +151,9 @@ pub fn view(
         let action_button = button(text(file_action_label).size(12))
             .style(retry_button_style)
             .on_press(AppMessage::OpenAttachment {
+                message_id: message.message_id,
                 local_path: message.media_local_path.clone(),
-                remote_url: message.media_url.clone(),
+                file_id: message.media_file_id,
                 filename: Some(message.body.clone()),
             });
 
@@ -162,21 +166,20 @@ pub fn view(
         ]
         .spacing(4);
         if let Some(size) = message.media_file_size {
-            meta_col = meta_col.push(
-                text(format_file_size(size))
-                    .size(12)
-                    .color(if message.is_own {
-                        Color::from_rgb8(0x22, 0x2A, 0x20)
-                    } else {
-                        Color::from_rgb8(0xB8, 0xC0, 0xCC)
-                    }),
-            );
+            meta_col = meta_col.push(text(format_file_size(size)).size(12).color(
+                if message.is_own {
+                    Color::from_rgb8(0x22, 0x2A, 0x20)
+                } else {
+                    Color::from_rgb8(0xB8, 0xC0, 0xCC)
+                },
+            ));
         }
         button(meta_col)
             .style(navless_button_style)
             .on_press(AppMessage::OpenAttachment {
+                message_id: message.message_id,
                 local_path: message.media_local_path.clone(),
-                remote_url: message.media_url.clone(),
+                file_id: message.media_file_id,
                 filename: Some(message.body.clone()),
             })
             .into()
@@ -188,16 +191,14 @@ pub fn view(
             .into()
     };
 
-    let bubble = container(
-        column![content, footer].spacing(8),
-    )
-    .max_width(560.0)
-    .padding([10, 13])
-    .style(move |_| container::Style {
-        background: Some(Background::Color(bubble_bg)),
-        border: border::rounded(7.0),
-        ..container::Style::default()
-    });
+    let bubble = container(column![content, footer].spacing(8))
+        .max_width(560.0)
+        .padding([10, 13])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bubble_bg)),
+            border: border::rounded(7.0),
+            ..container::Style::default()
+        });
 
     let mut body = column![bubble].spacing(4);
 
@@ -253,7 +254,7 @@ pub fn view(
             .on_right_press(AppMessage::ShowAttachmentMenu {
                 message_id: message.message_id,
                 local_path: message.media_local_path.clone(),
-                remote_url: message.media_url.clone(),
+                file_id: message.media_file_id,
                 filename: message.body.clone(),
             })
             .into()

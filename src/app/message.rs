@@ -200,14 +200,15 @@ pub enum AppMessage {
         local_path: String,
     },
     OpenAttachment {
+        message_id: u64,
         local_path: Option<String>,
-        remote_url: Option<String>,
+        file_id: Option<u64>,
         filename: Option<String>,
     },
     ShowAttachmentMenu {
         message_id: u64,
         local_path: Option<String>,
-        remote_url: Option<String>,
+        file_id: Option<u64>,
         filename: String,
     },
     DismissAttachmentMenu,
@@ -221,8 +222,9 @@ pub enum AppMessage {
         result: Result<String, UiError>,
     },
     AttachmentSaveAsSelected {
+        message_id: u64,
         local_path: Option<String>,
-        remote_url: Option<String>,
+        file_id: Option<u64>,
         filename: String,
         save_path: Option<String>,
     },
