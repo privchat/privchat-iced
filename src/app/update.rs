@@ -1262,7 +1262,9 @@ pub fn update(
         }
 
         AppMessage::MediaThumbnailDownloadFailed { message_id, error } => {
-            state.media_downloads_inflight.remove(&message_id);
+            // Keep failed id in the inflight/attempted set to avoid hot-loop retries
+            // on every session refresh / patch tick. Users can still open attachment
+            // explicitly to trigger an on-demand fetch.
             warn!(
                 "media thumbnail download failed: message_id={} error={}",
                 message_id,
@@ -2717,7 +2719,7 @@ fn schedule_thumbnail_downloads_for_items(
     items: &[MessageVm],
     bridge: &Arc<dyn SdkBridge>,
 ) -> Vec<Task<AppMessage>> {
-    const DOWNLOAD_WINDOW: usize = 48;
+    const DOWNLOAD_WINDOW: usize = 12;
     let start = items.len().saturating_sub(DOWNLOAD_WINDOW);
     items[start..]
         .iter()
