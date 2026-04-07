@@ -12,6 +12,7 @@ pub fn view(
     channel_id: u64,
     channel_type: i32,
     timeline: &TimelineState,
+    opened_menu_message_id: Option<u64>,
 ) -> Element<'_, AppMessage> {
     let mut list = column!().spacing(14).padding([12, 18]);
 
@@ -21,7 +22,7 @@ pub fn view(
 
     if !timeline.items.is_empty() {
         for message in &timeline.items {
-            list = list.push(message_bubble::view(message));
+            list = list.push(message_bubble::view(message, opened_menu_message_id));
         }
     }
 

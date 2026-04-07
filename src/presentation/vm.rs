@@ -69,6 +69,7 @@ pub struct GroupListItemVm {
 #[derive(Debug, Clone, Default)]
 pub struct FriendRequestItemVm {
     pub from_user_id: u64,
+    pub user: SearchUserVm,
     pub title: String,
     pub subtitle: String,
     pub is_added: bool,
@@ -127,6 +128,9 @@ pub struct MessageVm {
     pub from_uid: u64,
     pub body: String,
     pub message_type: i32,
+    pub media_url: Option<String>,
+    pub media_local_path: Option<String>,
+    pub media_file_size: Option<u64>,
     pub created_at: i64,
     pub pts: Option<u64>,
     pub send_state: Option<MessageSendStateVm>,

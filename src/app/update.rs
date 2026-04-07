@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use iced::{window, Size, Task};
+use privchat_protocol::message::ContentMessageType;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -28,6 +31,10 @@ const SESSION_LIST_MIN_WIDTH: f32 = 260.0;
 const SESSION_LIST_MAX_WIDTH: f32 = 620.0;
 const CHAT_MIN_WIDTH: f32 = 420.0;
 const CHAT_MAX_WIDTH: f32 = 1200.0;
+const TEXT_MESSAGE_TYPE: i32 = ContentMessageType::Text as i32;
+const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
+const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
+const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
 
 /// Sole mutation entry point.
 pub fn update(
@@ -172,9 +179,6 @@ pub fn update(
             if state.auth.user_id.is_none() {
                 return Task::none();
             }
-            if !matches!(state.route, Route::AddFriend) {
-                return Task::none();
-            }
             state.add_friend.contacts_error = None;
             schedule_add_friend_refresh(bridge)
         }
@@ -267,6 +271,9 @@ pub fn update(
         AppMessage::GlobalLeftMousePressed { window_id } => {
             if state.main_window_id != Some(window_id) {
                 return Task::none();
+            }
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
             }
             if let Some(cursor_x) = state.layout.last_cursor_x {
                 if is_cursor_near_session_splitter(state, cursor_x) {
@@ -500,7 +507,20 @@ pub fn update(
                 schedule_session_list_refresh(state, bridge),
                 schedule_total_unread_refresh(bridge),
                 schedule_local_accounts_refresh(bridge),
+                schedule_active_username_refresh(bridge),
             ])
+        }
+
+        AppMessage::ActiveUsernameLoaded { username } => {
+            if !username.trim().is_empty() {
+                state.auth.username = username;
+            }
+            Task::none()
+        }
+
+        AppMessage::ActiveUsernameLoadFailed { error } => {
+            warn!("load_active_username failed: {}", format_ui_error(&error));
+            Task::none()
         }
 
         AppMessage::SwitchAccountFailed { uid, error } => {
@@ -543,6 +563,7 @@ pub fn update(
                 schedule_session_list_refresh(state, bridge),
                 schedule_total_unread_refresh(bridge),
                 schedule_local_accounts_refresh(bridge),
+                schedule_active_username_refresh(bridge),
             ])
         }
 
@@ -575,13 +596,26 @@ pub fn update(
                 chat.unread_marker = snapshot.unread_marker;
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
             }
+            let media_items = state
+                .active_chat
+                .as_ref()
+                .map(|chat| chat.timeline.items.clone())
+                .unwrap_or_default();
+            let media_tasks = schedule_thumbnail_downloads_for_items(state, &media_items);
             clear_local_unread_for_channel(state, channel_id, channel_type);
             let last_read_pts = state
                 .active_chat
                 .as_ref()
                 .and_then(|chat| latest_read_pts(&chat.timeline.items))
                 .unwrap_or(0);
-            schedule_mark_read_task(bridge, channel_id, channel_type, last_read_pts)
+            let mut tasks = media_tasks;
+            tasks.push(schedule_mark_read_task(
+                bridge,
+                channel_id,
+                channel_type,
+                last_read_pts,
+            ));
+            Task::batch(tasks)
         }
 
         AppMessage::ConversationOpenFailed {
@@ -873,6 +907,271 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::ComposerPickImagePressed => Task::perform(
+            async move {
+                rfd::FileDialog::new()
+                    .add_filter(
+                        "Images",
+                        &["png", "jpg", "jpeg", "gif", "webp", "bmp", "heic"],
+                    )
+                    .pick_file()
+                    .map(|path| path.to_string_lossy().to_string())
+            },
+            |path| AppMessage::ComposerAttachmentPicked { path },
+        ),
+
+        AppMessage::ComposerPickFilePressed => Task::perform(
+            async move {
+                rfd::FileDialog::new()
+                    .pick_file()
+                    .map(|path| path.to_string_lossy().to_string())
+            },
+            |path| AppMessage::ComposerAttachmentPicked { path },
+        ),
+
+        AppMessage::ComposerAttachmentPicked { path } => match path {
+            Some(path) => handle_send_attachment_path(state, bridge, path),
+            None => Task::none(),
+        },
+
+        AppMessage::OpenImagePreview {
+            message_id,
+            local_path,
+        } => {
+            if local_path.starts_with("http://") || local_path.starts_with("https://") {
+                let url = local_path.clone();
+                let target_path = media_thumbnail_cache_path(
+                    state.auth.user_id.unwrap_or(0),
+                    now_timestamp_millis(),
+                    message_id,
+                    &url,
+                )
+                .to_string_lossy()
+                .to_string();
+                return Task::perform(
+                    async move { download_image_thumbnail(message_id, url, target_path).await },
+                    move |result| match result {
+                        Ok(path) => AppMessage::MediaThumbnailDownloaded {
+                            message_id,
+                            local_path: path,
+                        },
+                        Err(error) => AppMessage::MediaThumbnailDownloadFailed { message_id, error },
+                    },
+                );
+            }
+            if let Some(chat) = &mut state.active_chat {
+                chat.preview_image_path = Some(local_path);
+            }
+            Task::none()
+        }
+
+        AppMessage::OpenAttachment {
+            local_path,
+            remote_url,
+            filename,
+        } => Task::perform(
+            async move {
+                let path = ensure_attachment_local_path(local_path, remote_url, filename, None).await?;
+                open_with_system(&path)?;
+                Ok(path)
+            },
+            |result| AppMessage::AttachmentOpenResolved { result },
+        ),
+
+        AppMessage::ShowAttachmentMenu {
+            message_id,
+            local_path,
+            remote_url,
+            filename,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
+                    message_id,
+                    local_path,
+                    remote_url,
+                    filename,
+                });
+            }
+            Task::none()
+        }
+
+        AppMessage::DismissAttachmentMenu => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::AttachmentMenuOpen => {
+            let menu = state
+                .active_chat
+                .as_ref()
+                .and_then(|chat| chat.attachment_menu.clone());
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            match menu {
+                Some(menu) => Task::perform(
+                    async move {
+                        let path = ensure_attachment_local_path(
+                            menu.local_path,
+                            menu.remote_url,
+                            Some(menu.filename),
+                            None,
+                        )
+                        .await?;
+                        open_with_system(&path)?;
+                        Ok(path)
+                    },
+                    |result| AppMessage::AttachmentOpenResolved { result },
+                ),
+                None => Task::none(),
+            }
+        }
+
+        AppMessage::AttachmentMenuOpenFolder => {
+            let menu = state
+                .active_chat
+                .as_ref()
+                .and_then(|chat| chat.attachment_menu.clone());
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            match menu {
+                Some(menu) => Task::perform(
+                    async move {
+                        let path = ensure_attachment_local_path(
+                            menu.local_path,
+                            menu.remote_url,
+                            Some(menu.filename),
+                            None,
+                        )
+                        .await?;
+                        let parent = Path::new(&path)
+                            .parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or(path.clone());
+                        open_with_system(&parent)?;
+                        Ok(parent)
+                    },
+                    |result| AppMessage::AttachmentOpenFolderResolved { result },
+                ),
+                None => Task::none(),
+            }
+        }
+
+        AppMessage::AttachmentMenuSaveAs => {
+            let menu = state
+                .active_chat
+                .as_ref()
+                .and_then(|chat| chat.attachment_menu.clone());
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            match menu {
+                Some(menu) => {
+                    let local_path = menu.local_path;
+                    let remote_url = menu.remote_url;
+                    let filename = menu.filename;
+                    let dialog_filename = filename.clone();
+                    Task::perform(
+                        async move {
+                            rfd::FileDialog::new()
+                                .set_file_name(&dialog_filename)
+                                .save_file()
+                                .map(|path| path.to_string_lossy().to_string())
+                        },
+                        move |save_path| AppMessage::AttachmentSaveAsSelected {
+                            local_path,
+                            remote_url,
+                            filename,
+                            save_path,
+                        },
+                    )
+                }
+                None => Task::none(),
+            }
+        }
+
+        AppMessage::AttachmentSaveAsSelected {
+            local_path,
+            remote_url,
+            filename,
+            save_path,
+        } => match save_path {
+            Some(path) => Task::perform(
+                async move {
+                    let saved = ensure_attachment_local_path(
+                        local_path,
+                        remote_url,
+                        Some(filename),
+                        Some(path),
+                    )
+                    .await?;
+                    Ok(saved)
+                },
+                |result| AppMessage::AttachmentSaveAsResolved { result },
+            ),
+            None => Task::none(),
+        },
+
+        AppMessage::AttachmentOpenResolved { result } => {
+            if let Err(error) = result {
+                warn!("open attachment failed: {}", format_ui_error(&error));
+            }
+            Task::none()
+        }
+
+        AppMessage::AttachmentOpenFolderResolved { result } => {
+            if let Err(error) = result {
+                warn!("open attachment folder failed: {}", format_ui_error(&error));
+            }
+            Task::none()
+        }
+
+        AppMessage::AttachmentSaveAsResolved { result } => {
+            if let Err(error) = result {
+                warn!("save attachment as failed: {}", format_ui_error(&error));
+            }
+            Task::none()
+        }
+
+        AppMessage::CloseImagePreview => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.preview_image_path = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::MediaThumbnailDownloaded {
+            message_id,
+            local_path,
+        } => {
+            state.media_downloads_inflight.remove(&message_id);
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(item) = chat
+                    .timeline
+                    .items
+                    .iter_mut()
+                    .find(|item| item.message_id == message_id)
+                {
+                    item.media_local_path = Some(local_path);
+                    chat.preview_image_path = item.media_local_path.clone();
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::MediaThumbnailDownloadFailed { message_id, error } => {
+            state.media_downloads_inflight.remove(&message_id);
+            warn!(
+                "media thumbnail download failed: message_id={} error={}",
+                message_id,
+                format_ui_error(&error)
+            );
+            Task::none()
+        }
+
         AppMessage::ComposerEdited { action } => {
             if let Some(chat) = &mut state.active_chat {
                 chat.composer.editor.perform(action);
@@ -909,15 +1208,26 @@ pub fn update(
             channel_type,
             source,
             message,
-        } => handle_global_message_loaded(
-            state,
-            bridge,
-            message_id,
-            channel_id,
-            channel_type,
-            source,
-            message,
-        ),
+        } => {
+            let media_tasks = message
+                .as_ref()
+                .map(|item| schedule_thumbnail_download_for_message(state, item))
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>();
+            let core = handle_global_message_loaded(
+                state,
+                bridge,
+                message_id,
+                channel_id,
+                channel_type,
+                source,
+                message,
+            );
+            let mut tasks = vec![core];
+            tasks.extend(media_tasks);
+            Task::batch(tasks)
+        }
 
         AppMessage::GlobalMessageLoadFailed {
             message_id,
@@ -973,14 +1283,24 @@ pub fn update(
                     | TimelinePatchVm::RemoveMessage { .. }
                     | TimelinePatchVm::UpdateUnreadMarker { .. }
             );
+            let mut media_items: Option<Vec<MessageVm>> = None;
             if let Some(chat) = &mut state.active_chat {
                 let applied = apply_timeline_patch(chat, patch);
                 if applied {
                     chat.timeline.revision = revision;
                     chat.runtime_index.rebuild_from_items(&chat.timeline.items);
-                    if should_refresh_unread {
-                        return schedule_total_unread_refresh(bridge);
-                    }
+                    media_items = Some(chat.timeline.items.clone());
+                }
+            }
+            if let Some(items) = media_items {
+                let media_tasks = schedule_thumbnail_downloads_for_items(state, &items);
+                if should_refresh_unread {
+                    let mut tasks = media_tasks;
+                    tasks.push(schedule_total_unread_refresh(bridge));
+                    return Task::batch(tasks);
+                }
+                if !media_tasks.is_empty() {
+                    return Task::batch(media_tasks);
                 }
             }
             Task::none()
@@ -1000,6 +1320,7 @@ pub fn update(
             if !pass_dual_guard(state, channel_id, channel_type, open_token) {
                 return Task::none();
             }
+            let mut media_items: Option<Vec<MessageVm>> = None;
             if let Some(chat) = &mut state.active_chat {
                 chat.timeline.is_loading_more = false;
                 chat.timeline.oldest_server_message_id = page.oldest_server_message_id;
@@ -1007,6 +1328,11 @@ pub fn update(
                 prepend_history_items(&mut chat.timeline.items, page.items);
                 normalize_timeline_items(&mut chat.timeline.items);
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
+                media_items = Some(chat.timeline.items.clone());
+            }
+            if let Some(items) = media_items {
+                let tasks = schedule_thumbnail_downloads_for_items(state, &items);
+                return Task::batch(tasks);
             }
             Task::none()
         }
@@ -1031,14 +1357,7 @@ pub fn update(
             channel_type,
             at_bottom,
             near_top,
-        } => handle_viewport_changed(
-            state,
-            bridge,
-            channel_id,
-            channel_type,
-            at_bottom,
-            near_top,
-        ),
+        } => handle_viewport_changed(state, bridge, channel_id, channel_type, at_bottom, near_top),
     }
 }
 
@@ -1079,6 +1398,8 @@ fn handle_conversation_selected(
         runtime_index: RuntimeMessageIndex::default(),
         composer: ComposerState::default(),
         unread_marker: UnreadMarkerVm::default(),
+        preview_image_path: None,
+        attachment_menu: None,
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
@@ -1262,6 +1583,17 @@ fn schedule_local_accounts_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessa
     )
 }
 
+fn schedule_active_username_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.load_active_username().await },
+        |result| match result {
+            Ok(username) => AppMessage::ActiveUsernameLoaded { username },
+            Err(error) => AppMessage::ActiveUsernameLoadFailed { error },
+        },
+    )
+}
+
 fn schedule_add_friend_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
     let friends_bridge = Arc::clone(bridge);
     let groups_bridge = Arc::clone(bridge);
@@ -1415,7 +1747,10 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             client_txn_id: Some(client_txn_id),
             from_uid,
             body: body.clone(),
-            message_type: 0,
+            message_type: TEXT_MESSAGE_TYPE,
+            media_url: None,
+            media_local_path: None,
+            media_file_size: None,
             created_at: now,
             pts: None,
             send_state: Some(MessageSendStateVm::Sending),
@@ -1449,6 +1784,122 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
                     "send_text_message failed: channel_id={} channel_type={} client_txn_id={} error={}",
                     channel_id, channel_type, client_txn_id, format_ui_error(&error)
                 );
+                AppMessage::TimelinePatched {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    revision: events::allocate_patch_revision(),
+                    patch: TimelinePatchVm::RemoveMessage {
+                        key: TimelineItemKey::Local(client_txn_id),
+                    },
+                }
+            }
+        },
+    )
+}
+
+fn attachment_type_and_preview(path: &Path) -> (i32, String) {
+    let ext = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    let filename = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("file")
+        .to_string();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" => (IMAGE_MESSAGE_TYPE, filename),
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => (VIDEO_MESSAGE_TYPE, filename),
+        _ => (FILE_MESSAGE_TYPE, filename),
+    }
+}
+
+fn handle_send_attachment_path(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    file_path: String,
+) -> Task<AppMessage> {
+    let (channel_id, channel_type, open_token) = match state.active_chat.as_ref() {
+        Some(chat) => (chat.channel_id, chat.channel_type, chat.open_token),
+        None => return Task::none(),
+    };
+    if channel_id == 0 || channel_type <= 0 {
+        state.auth.error = Some(format!(
+            "发送失败: 无效会话参数 channel_id={} channel_type={}",
+            channel_id, channel_type
+        ));
+        return Task::none();
+    }
+
+    let client_txn_id = match bridge.generate_local_message_id() {
+        Ok(id) => id,
+        Err(error) => {
+            warn!(
+                "generate_local_message_id failed for attachment: {}",
+                format_ui_error(&error)
+            );
+            state.auth.error = Some(format!("发送失败: {}", format_ui_error(&error)));
+            return Task::none();
+        }
+    };
+
+    let path = Path::new(&file_path);
+    let (message_type, preview) = attachment_type_and_preview(path);
+    let local_file_size = fs::metadata(path).ok().map(|m| m.len());
+    let from_uid = state.auth.user_id.unwrap_or(0);
+    let now = now_timestamp_millis();
+
+    if let Some(chat) = &mut state.active_chat {
+        let local_echo = MessageVm {
+            key: TimelineItemKey::Local(client_txn_id),
+            channel_id,
+            channel_type,
+            message_id: client_txn_id,
+            server_message_id: None,
+            client_txn_id: Some(client_txn_id),
+            from_uid,
+            body: preview.clone(),
+            message_type,
+            media_url: None,
+            media_local_path: if message_type == IMAGE_MESSAGE_TYPE {
+                Some(file_path.clone())
+            } else {
+                None
+            },
+            media_file_size: local_file_size,
+            created_at: now,
+            pts: None,
+            send_state: Some(MessageSendStateVm::Sending),
+            is_own: true,
+            is_deleted: false,
+        };
+        chat.timeline.items.push(local_echo);
+        chat.runtime_index.bind(client_txn_id, client_txn_id);
+        chat.composer.emoji_picker_open = false;
+    }
+    touch_session_preview(state, channel_id, channel_type, &preview, now);
+
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move {
+            bridge
+                .send_attachment_message(channel_id, channel_type, client_txn_id, file_path)
+                .await
+        },
+        move |result| match result {
+            Ok(message_id) => AppMessage::TimelineUpdatedIngress {
+                channel_id,
+                channel_type,
+                open_token,
+                message_id,
+            },
+            Err(error) => {
+                warn!(
+                        "send_attachment_message failed: channel_id={} channel_type={} client_txn_id={} error={}",
+                        channel_id, channel_type, client_txn_id, format_ui_error(&error)
+                    );
                 AppMessage::TimelinePatched {
                     channel_id,
                     channel_type,
@@ -1962,6 +2413,11 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
                 warn!("ignore ReplaceLocalEcho without server_message_id");
                 return false;
             };
+            let preserved_local_path = find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
+                .and_then(|index| chat.timeline.items[index].media_local_path.clone());
+            if remote.media_local_path.is_none() {
+                remote.media_local_path = preserved_local_path;
+            }
             remote.client_txn_id = Some(client_txn_id);
             remote.key = TimelineItemKey::Remote { server_message_id };
 
@@ -2028,21 +2484,10 @@ fn normalize_timeline_items(items: &mut [MessageVm]) {
     items.sort_by_key(timeline_order_key);
 }
 
-fn timeline_order_key(item: &MessageVm) -> (u8, u64, i64, u64, u64) {
-    let tier = if item.pts.is_some() {
-        0_u8
-    } else if item.server_message_id.is_some() {
-        1_u8
-    } else {
-        2_u8
-    };
-    (
-        tier,
-        item.pts.unwrap_or(u64::MAX),
-        item.created_at,
-        item.server_message_id.unwrap_or(u64::MAX),
-        item.message_id,
-    )
+fn timeline_order_key(item: &MessageVm) -> u64 {
+    // Use DB row id as the canonical order key:
+    // smaller id first, larger id last.
+    item.message_id
 }
 
 fn apply_update_send_state_patch(
@@ -2089,11 +2534,14 @@ fn is_valid_send_transition(current: &MessageSendStateVm, next: &MessageSendStat
         (Queued, Sending)
             | (Queued, FailedRetryable { .. })
             | (Queued, FailedPermanent { .. })
+            | (Queued, Sent)
             | (Sending, Sent)
             | (Sending, FailedRetryable { .. })
             | (Sending, FailedPermanent { .. })
             | (Sending, Retrying)
+            | (FailedRetryable { .. }, Sending)
             | (FailedRetryable { .. }, Retrying)
+            | (FailedRetryable { .. }, Sent)
             | (Retrying, Sending)
             | (Retrying, FailedRetryable { .. })
             | (Retrying, FailedPermanent { .. })
@@ -2162,6 +2610,229 @@ fn format_ui_error(error: &crate::presentation::vm::UiError) -> String {
     }
 }
 
+fn schedule_thumbnail_downloads_for_items(
+    state: &mut AppState,
+    items: &[MessageVm],
+) -> Vec<Task<AppMessage>> {
+    items
+        .iter()
+        .filter_map(|item| schedule_thumbnail_download_for_message(state, item))
+        .collect()
+}
+
+fn schedule_thumbnail_download_for_message(
+    state: &mut AppState,
+    item: &MessageVm,
+) -> Option<Task<AppMessage>> {
+    if item.message_type != IMAGE_MESSAGE_TYPE {
+        return None;
+    }
+    // Do not auto-download thumbnails while rendering timeline.
+    // Spec-driven behavior for iced: local-first media rendering from SDK-managed user storage.
+    // Network fetch should happen only on explicit user action (open/download).
+    if let Some(local_path) = item.media_local_path.as_ref() {
+        if Path::new(local_path).exists() {
+            return None;
+        }
+    }
+    let _ = state.media_downloads_inflight.remove(&item.message_id);
+    None
+}
+
+fn infer_file_extension(url: &str) -> &'static str {
+    let lower = url.to_ascii_lowercase();
+    for ext in ["jpg", "jpeg", "png", "gif", "webp", "bmp", "heic"] {
+        let needle = format!(".{ext}");
+        if lower.contains(&needle) {
+            return ext;
+        }
+    }
+    "jpg"
+}
+
+async fn download_image_thumbnail(
+    _message_id: u64,
+    url: String,
+    target_path: String,
+) -> Result<String, crate::presentation::vm::UiError> {
+    let response = reqwest::get(&url).await.map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("download thumbnail failed: {error}"))
+    })?;
+    let response = response.error_for_status().map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!(
+            "download thumbnail bad status: {error}"
+        ))
+    })?;
+    let bytes = response.bytes().await.map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("read thumbnail body failed: {error}"))
+    })?;
+
+    let file_path = PathBuf::from(target_path);
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!(
+                "create thumbnail cache failed: {error}"
+            ))
+        })?;
+    }
+    fs::write(&file_path, &bytes).map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("write thumbnail failed: {error}"))
+    })?;
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+fn media_thumbnail_cache_path(
+    user_id: u64,
+    created_at_ms: i64,
+    message_id: u64,
+    media_url: &str,
+) -> PathBuf {
+    let yyyymm = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(created_at_ms)
+        .map(|dt| dt.format("%Y%m").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y%m").to_string());
+    let extension = infer_file_extension(media_url);
+    media_data_root()
+        .join("users")
+        .join(user_id.to_string())
+        .join("files")
+        .join(yyyymm)
+        .join(message_id.to_string())
+        .join(format!("thumb.{extension}"))
+}
+
+fn media_data_root() -> PathBuf {
+    if let Some(data_dir) = std::env::var("PRIVCHAT_DATA_DIR")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return PathBuf::from(data_dir);
+    }
+    if let Some(home_dir) = std::env::var("HOME")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return PathBuf::from(home_dir).join(".privchat-rust");
+    }
+    std::env::temp_dir().join("privchat-rust")
+}
+
+async fn ensure_attachment_local_path(
+    local_path: Option<String>,
+    remote_url: Option<String>,
+    filename: Option<String>,
+    save_to: Option<String>,
+) -> Result<String, crate::presentation::vm::UiError> {
+    if let Some(path) = local_path {
+        let target = Path::new(&path);
+        if target.exists() {
+            return Ok(target.to_string_lossy().to_string());
+        }
+    }
+    let url = remote_url.ok_or_else(|| {
+        crate::presentation::vm::UiError::Unknown("attachment download url missing".to_string())
+    })?;
+
+    let mut candidate_urls = vec![url.clone()];
+    if let Some((head, tail)) = url.split_once("/api/app/files/") {
+        if !head.ends_with("/files") {
+            candidate_urls.push(format!("{head}/files/api/app/files/{tail}"));
+        }
+    }
+    if let Some((head, tail)) = url.split_once("/files/api/app/files/") {
+        candidate_urls.push(format!("{head}/api/app/files/{tail}"));
+    }
+    candidate_urls.dedup();
+
+    let mut last_error = String::new();
+    let mut bytes_opt = None;
+    for candidate in candidate_urls {
+        let response = match reqwest::get(&candidate).await {
+            Ok(resp) => resp,
+            Err(error) => {
+                last_error = format!("error sending request for url ({candidate}): {error}");
+                continue;
+            }
+        };
+        let response = match response.error_for_status() {
+            Ok(resp) => resp,
+            Err(error) => {
+                last_error = format!("download bad status for url ({candidate}): {error}");
+                continue;
+            }
+        };
+        match response.bytes().await {
+            Ok(bytes) => {
+                bytes_opt = Some(bytes);
+                break;
+            }
+            Err(error) => {
+                last_error = format!("read body failed for url ({candidate}): {error}");
+            }
+        }
+    }
+    let bytes = bytes_opt.ok_or_else(|| {
+        crate::presentation::vm::UiError::Unknown(format!(
+            "download attachment failed: {last_error}"
+        ))
+    })?;
+
+    let target_path = if let Some(path) = save_to {
+        Path::new(&path).to_path_buf()
+    } else {
+        let mut base = std::env::var("HOME")
+            .map(|home| Path::new(&home).join("Downloads").join("PrivChat"))
+            .unwrap_or_else(|_| std::env::temp_dir().join("privchat-downloads"));
+        fs::create_dir_all(&base).map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!(
+                "create download directory failed: {error}"
+            ))
+        })?;
+        let suggested = filename.unwrap_or_else(|| {
+            url.rsplit('/')
+                .next()
+                .filter(|v| !v.is_empty())
+                .unwrap_or("attachment.bin")
+                .to_string()
+        });
+        base.push(suggested);
+        base
+    };
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!("create target directory failed: {error}"))
+        })?;
+    }
+    fs::write(&target_path, &bytes).map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("write attachment failed: {error}"))
+    })?;
+
+    Ok(target_path.to_string_lossy().to_string())
+}
+
+fn open_with_system(target: &str) -> Result<(), crate::presentation::vm::UiError> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open").arg(target).status();
+    #[cfg(target_os = "linux")]
+    let status = std::process::Command::new("xdg-open").arg(target).status();
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "start", "", target])
+        .status();
+
+    status
+        .map_err(|e| crate::presentation::vm::UiError::Unknown(format!("spawn opener failed: {e}")))
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(crate::presentation::vm::UiError::Unknown(format!(
+                    "open command exited with status: {s}"
+                )))
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -2225,6 +2896,10 @@ mod tests {
             _uid: String,
         ) -> Result<crate::presentation::vm::LoginSessionVm, UiError> {
             Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn load_active_username(&self) -> Result<String, UiError> {
+            Ok("demo".to_string())
         }
 
         async fn logout(&self) -> Result<(), UiError> {
@@ -2307,6 +2982,16 @@ mod tests {
             Err(UiError::Unknown("unused".to_string()))
         }
 
+        async fn send_attachment_message(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+            _client_txn_id: u64,
+            _file_path: String,
+        ) -> Result<u64, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
         async fn retry_send(
             &self,
             _channel_id: u64,
@@ -2356,6 +3041,8 @@ mod tests {
             runtime_index: RuntimeMessageIndex::default(),
             composer: ComposerState::default(),
             unread_marker: UnreadMarkerVm::default(),
+            preview_image_path: None,
+            attachment_menu: None,
         });
         state
     }
@@ -2371,6 +3058,8 @@ mod tests {
             from_uid: 7,
             body: "hello".to_string(),
             message_type: 1,
+            media_url: None,
+            media_local_path: None,
             created_at: 0,
             pts: None,
             send_state: Some(MessageSendStateVm::Queued),
@@ -2396,6 +3085,8 @@ mod tests {
             from_uid: 42,
             body: body.to_string(),
             message_type: 1,
+            media_url: None,
+            media_local_path: None,
             created_at,
             pts: Some(pts),
             send_state: None,
@@ -2516,6 +3207,8 @@ mod tests {
             from_uid: 42,
             body: "remote".to_string(),
             message_type: 1,
+            media_url: None,
+            media_local_path: None,
             created_at: 0,
             pts: Some(99),
             send_state: None,
@@ -2559,6 +3252,8 @@ mod tests {
             from_uid: 42,
             body: "remote".to_string(),
             message_type: 1,
+            media_url: None,
+            media_local_path: None,
             created_at: 1,
             pts: Some(22),
             send_state: None,

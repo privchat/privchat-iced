@@ -17,7 +17,8 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
 
     let toolbar = row![
         tool_button(Icon::Smile, Some(AppMessage::ToggleEmojiPicker)),
-        tool_button(Icon::Folder, None),
+        tool_button(Icon::Image, Some(AppMessage::ComposerPickImagePressed)),
+        tool_button(Icon::Folder, Some(AppMessage::ComposerPickFilePressed)),
     ]
     .spacing(12)
     .padding([2, 0])

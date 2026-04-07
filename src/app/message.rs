@@ -4,8 +4,7 @@ use iced::window;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
     GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, SearchUserVm,
-    SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm,
-    UiError,
+    SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +141,12 @@ pub enum AppMessage {
         uid: String,
         session: LoginSessionVm,
     },
+    ActiveUsernameLoaded {
+        username: String,
+    },
+    ActiveUsernameLoadFailed {
+        error: UiError,
+    },
     SwitchAccountFailed {
         uid: String,
         error: UiError,
@@ -184,6 +189,54 @@ pub enum AppMessage {
     DismissEmojiPicker,
     EmojiPicked {
         emoji: String,
+    },
+    ComposerPickImagePressed,
+    ComposerPickFilePressed,
+    ComposerAttachmentPicked {
+        path: Option<String>,
+    },
+    OpenImagePreview {
+        message_id: u64,
+        local_path: String,
+    },
+    OpenAttachment {
+        local_path: Option<String>,
+        remote_url: Option<String>,
+        filename: Option<String>,
+    },
+    ShowAttachmentMenu {
+        message_id: u64,
+        local_path: Option<String>,
+        remote_url: Option<String>,
+        filename: String,
+    },
+    DismissAttachmentMenu,
+    AttachmentMenuOpen,
+    AttachmentMenuOpenFolder,
+    AttachmentMenuSaveAs,
+    AttachmentOpenResolved {
+        result: Result<String, UiError>,
+    },
+    AttachmentOpenFolderResolved {
+        result: Result<String, UiError>,
+    },
+    AttachmentSaveAsSelected {
+        local_path: Option<String>,
+        remote_url: Option<String>,
+        filename: String,
+        save_path: Option<String>,
+    },
+    AttachmentSaveAsResolved {
+        result: Result<String, UiError>,
+    },
+    CloseImagePreview,
+    MediaThumbnailDownloaded {
+        message_id: u64,
+        local_path: String,
+    },
+    MediaThumbnailDownloadFailed {
+        message_id: u64,
+        error: UiError,
     },
     AddFriendInputChanged {
         text: String,

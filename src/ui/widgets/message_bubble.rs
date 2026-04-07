@@ -1,8 +1,13 @@
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{button, column, container, image, mouse_area, row, text};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
+use privchat_protocol::message::ContentMessageType;
 
 use crate::app::message::AppMessage;
 use crate::presentation::vm::{MessageSendStateVm, MessageVm};
+
+const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
+const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
+const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
 
 fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static str {
     match state {
@@ -22,7 +27,7 @@ fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static 
 }
 
 /// Render one timeline row in a WeChat-like bubble style.
-pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
+pub fn view(message: &MessageVm, opened_menu_message_id: Option<u64>) -> Element<'_, AppMessage> {
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
     } else {
@@ -36,11 +41,17 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
 
     let time_text = format_message_time(message.created_at);
     let footer: Element<'_, AppMessage> = if message.is_own {
-        let status_label = message
-            .send_state
-            .as_ref()
-            .map(|state| send_state_label_zh(state, message.pts.is_some()))
-            .unwrap_or("已发送");
+        // Any message resolved to a server id should be displayed as sent.
+        // This avoids stale local failure labels after eventual queue success.
+        let status_label = if message.server_message_id.is_some() {
+            "已发送"
+        } else {
+            message
+                .send_state
+                .as_ref()
+                .map(|state| send_state_label_zh(state, message.pts.is_some()))
+                .unwrap_or("已发送")
+        };
 
         container(
             row![
@@ -67,15 +78,98 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
         .into()
     };
 
-    let bubble = container(
-        column![
+    let content: Element<'_, AppMessage> = if message.message_type == IMAGE_MESSAGE_TYPE {
+        if message.media_local_path.is_some() || message.media_url.is_some() {
+            let preview: Element<'_, AppMessage> = if let Some(local_path) = &message.media_local_path
+            {
+                image(local_path.clone())
+                    .width(Length::Fixed(220.0))
+                    .height(Length::Fixed(160.0))
+                    .content_fit(iced::ContentFit::Cover)
+                    .into()
+            } else {
+                container(
+                    text(&message.body)
+                        .size(14)
+                        .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
+                )
+                .width(Length::Fixed(220.0))
+                .height(Length::Fixed(80.0))
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
+                    border: border::rounded(8.0),
+                    ..container::Style::default()
+                })
+                .into()
+            };
+            button(preview)
+            .style(navless_button_style)
+            .on_press(AppMessage::OpenAttachment {
+                local_path: message.media_local_path.clone(),
+                remote_url: message.media_url.clone(),
+                filename: Some(message.body.clone()),
+            })
+            .into()
+        } else {
             text(&message.body)
                 .size(15)
                 .line_height(iced::widget::text::LineHeight::Relative(1.28))
-                .color(bubble_text),
-            footer,
+                .color(bubble_text)
+                .into()
+        }
+    } else if matches!(message.message_type, FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE) {
+        let file_action_label = if message.media_local_path.is_some() {
+            "打开"
+        } else {
+            "下载"
+        };
+        let action_button = button(text(file_action_label).size(12))
+            .style(retry_button_style)
+            .on_press(AppMessage::OpenAttachment {
+                local_path: message.media_local_path.clone(),
+                remote_url: message.media_url.clone(),
+                filename: Some(message.body.clone()),
+            });
+
+        let mut meta_col = column![
+            action_button,
+            text(&message.body)
+                .size(15)
+                .line_height(iced::widget::text::LineHeight::Relative(1.28))
+                .color(bubble_text)
         ]
-        .spacing(8),
+        .spacing(4);
+        if let Some(size) = message.media_file_size {
+            meta_col = meta_col.push(
+                text(format_file_size(size))
+                    .size(12)
+                    .color(if message.is_own {
+                        Color::from_rgb8(0x22, 0x2A, 0x20)
+                    } else {
+                        Color::from_rgb8(0xB8, 0xC0, 0xCC)
+                    }),
+            );
+        }
+        button(meta_col)
+            .style(navless_button_style)
+            .on_press(AppMessage::OpenAttachment {
+                local_path: message.media_local_path.clone(),
+                remote_url: message.media_url.clone(),
+                filename: Some(message.body.clone()),
+            })
+            .into()
+    } else {
+        text(&message.body)
+            .size(15)
+            .line_height(iced::widget::text::LineHeight::Relative(1.28))
+            .color(bubble_text)
+            .into()
+    };
+
+    let bubble = container(
+        column![content, footer].spacing(8),
     )
     .max_width(560.0)
     .padding([10, 13])
@@ -86,9 +180,27 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
     });
 
     let mut body = column![bubble].spacing(4);
+
+    let is_attachment = matches!(
+        message.message_type,
+        IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE
+    );
+    let show_attachment_menu = opened_menu_message_id == Some(message.message_id) && is_attachment;
+    if show_attachment_menu {
+        body = body.push(
+            row![
+                small_menu_button("打开", AppMessage::AttachmentMenuOpen),
+                small_menu_button("打开所在目录", AppMessage::AttachmentMenuOpenFolder),
+                small_menu_button("另存为", AppMessage::AttachmentMenuSaveAs),
+            ]
+            .spacing(6),
+        );
+    }
     if message.is_own {
         if let Some(send_state) = &message.send_state {
-            if matches!(send_state, MessageSendStateVm::FailedRetryable { .. }) {
+            if matches!(send_state, MessageSendStateVm::FailedRetryable { .. })
+                && message.server_message_id.is_none()
+            {
                 if let Some(client_txn_id) = message.client_txn_id {
                     body = body.push(
                         button(text("Retry").size(11))
@@ -115,7 +227,19 @@ pub fn view(message: &MessageVm) -> Element<'_, AppMessage> {
             .align_y(alignment::Vertical::Top)
     };
 
-    container(row).width(Length::Fill).into()
+    let container_row = container(row).width(Length::Fill);
+    if is_attachment {
+        mouse_area(container_row)
+            .on_right_press(AppMessage::ShowAttachmentMenu {
+                message_id: message.message_id,
+                local_path: message.media_local_path.clone(),
+                remote_url: message.media_url.clone(),
+                filename: message.body.clone(),
+            })
+            .into()
+    } else {
+        container_row.into()
+    }
 }
 
 fn avatar_chip(is_own: bool) -> Element<'static, AppMessage> {
@@ -155,6 +279,39 @@ fn retry_button_style(_theme: &Theme, status: button::Status) -> button::Style {
         border: border::rounded(6.0),
         shadow: Default::default(),
         snap: true,
+    }
+}
+
+fn navless_button_style(_theme: &Theme, _status: button::Status) -> button::Style {
+    button::Style {
+        background: None,
+        text_color: Color::TRANSPARENT,
+        border: border::width(0.0),
+        shadow: Default::default(),
+        snap: true,
+    }
+}
+
+fn small_menu_button<'a>(label: &'a str, msg: AppMessage) -> Element<'a, AppMessage> {
+    button(text(label).size(11))
+        .style(retry_button_style)
+        .on_press(msg)
+        .into()
+}
+
+fn format_file_size(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = KB * 1024.0;
+    const GB: f64 = MB * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{bytes} B")
     }
 }
 

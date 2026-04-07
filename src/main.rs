@@ -86,7 +86,14 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
         return "Add Contacts".to_string();
     }
 
-    let active_peer_name = app
+    let my_name = app.state.auth.username.trim();
+    let my_name = if my_name.is_empty() {
+        "PrivChat".to_string()
+    } else {
+        my_name.to_string()
+    };
+
+    let active_chat_name = app
         .state
         .active_chat
         .as_ref()
@@ -109,19 +116,57 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
                 .filter(|title| !title.is_empty())
         });
 
-    let my_name = if app.state.auth.username.trim().is_empty() {
-        app.state
-            .auth
-            .user_id
-            .map(|user_id| format!("U{user_id}"))
-            .unwrap_or_else(|| "PrivChat".to_string())
-    } else {
-        app.state.auth.username.trim().to_string()
-    };
+    let add_friend_selected_name = app
+        .state
+        .add_friend
+        .detail
+        .as_ref()
+        .map(|detail| detail.title.trim())
+        .filter(|title| !title.is_empty())
+        .or_else(|| {
+            app.state
+                .add_friend
+                .selected_panel_item
+                .and_then(|selection| match selection {
+                    crate::presentation::vm::AddFriendSelectionVm::Friend(user_id) => app
+                        .state
+                        .add_friend
+                        .friends
+                        .iter()
+                        .find(|item| item.user_id == user_id)
+                        .map(|item| item.title.trim())
+                        .filter(|title| !title.is_empty()),
+                    crate::presentation::vm::AddFriendSelectionVm::Group(group_id) => app
+                        .state
+                        .add_friend
+                        .groups
+                        .iter()
+                        .find(|item| item.group_id == group_id)
+                        .map(|item| item.title.trim())
+                        .filter(|title| !title.is_empty()),
+                    crate::presentation::vm::AddFriendSelectionVm::Request(user_id) => app
+                        .state
+                        .add_friend
+                        .requests
+                        .iter()
+                        .find(|item| item.from_user_id == user_id)
+                        .map(|item| item.title.trim())
+                        .filter(|title| !title.is_empty()),
+                })
+        });
 
-    match active_peer_name {
-        Some(peer_name) => format!("{peer_name} @ {my_name}"),
-        None => "PrivChat".to_string(),
+    match app.state.route {
+        Route::Chat | Route::SessionList => match active_chat_name {
+            Some(peer_name) => format!("{peer_name} @ {my_name}"),
+            None => "PrivChat".to_string(),
+        },
+        Route::AddFriend => match add_friend_selected_name {
+            Some(peer_name) => format!("{peer_name} @ {my_name}"),
+            None => "联系人".to_string(),
+        },
+        Route::Settings | Route::Splash | Route::Login | Route::SwitchAccount => {
+            "PrivChat".to_string()
+        }
     }
 }
 
@@ -145,15 +190,11 @@ fn main() -> anyhow::Result<()> {
         "config loaded"
     );
 
-    iced::daemon(
-        move || boot(config.clone()),
-        update,
-        view,
-    )
-    .title(window_title)
-    .default_font(Font::with_name("Microsoft YaHei"))
-    .subscription(subscription)
-    .run()?;
+    iced::daemon(move || boot(config.clone()), update, view)
+        .title(window_title)
+        .default_font(Font::with_name("Microsoft YaHei"))
+        .subscription(subscription)
+        .run()?;
 
     Ok(())
 }

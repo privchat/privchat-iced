@@ -101,6 +101,13 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
 fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
     let message_badge_count = (state.session_list.total_unread_count > 0)
         .then_some(state.session_list.total_unread_count);
+    let add_friend_badge_count = state
+        .add_friend
+        .requests
+        .iter()
+        .filter(|item| !item.is_added)
+        .count() as u32;
+    let add_friend_badge_count = (add_friend_badge_count > 0).then_some(add_friend_badge_count);
     let message_active = matches!(state.route, Route::SessionList | Route::Chat);
     let add_friend_active = matches!(state.route, Route::AddFriend);
     let settings_active =
@@ -117,7 +124,7 @@ fn sidebar(state: &AppState) -> Element<'_, AppMessage> {
         nav_icon(
             Icon::Contact,
             add_friend_active,
-            None,
+            add_friend_badge_count,
             AppMessage::OpenAddFriendPage
         ),
     ]

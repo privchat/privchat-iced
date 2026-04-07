@@ -1,4 +1,4 @@
-use iced::widget::{column, container, mouse_area, row, stack, text};
+use iced::widget::{column, container, image, mouse_area, row, stack, text};
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
@@ -52,7 +52,12 @@ pub fn view<'a>(chat: &'a ChatScreenState, title: &'a str) -> Element<'a, AppMes
     let body = container(
         column![
             unread_banner::view(&chat.unread_marker),
-            timeline_list::view(chat.channel_id, chat.channel_type, &chat.timeline),
+            timeline_list::view(
+                chat.channel_id,
+                chat.channel_type,
+                &chat.timeline,
+                chat.attachment_menu.as_ref().map(|m| m.message_id),
+            ),
         ]
         .height(Length::Fill),
     )
@@ -102,6 +107,36 @@ pub fn view<'a>(chat: &'a ChatScreenState, title: &'a str) -> Element<'a, AppMes
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    };
+
+    let content: Element<'_, AppMessage> = if let Some(path) = &chat.preview_image_path {
+        stack![
+            content,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.68))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::CloseImagePreview),
+            container(
+                image(path.clone())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .content_fit(iced::ContentFit::Contain)
+            )
+            .padding(20)
+            .width(Length::Fill)
+            .height(Length::Fill)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        content
     };
 
     container(content)

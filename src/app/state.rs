@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use iced::widget::text_editor;
 use iced::window;
@@ -242,6 +242,16 @@ pub struct ChatScreenState {
     pub runtime_index: RuntimeMessageIndex,
     pub composer: ComposerState,
     pub unread_marker: UnreadMarkerVm,
+    pub preview_image_path: Option<String>,
+    pub attachment_menu: Option<AttachmentMenuState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AttachmentMenuState {
+    pub message_id: u64,
+    pub local_path: Option<String>,
+    pub remote_url: Option<String>,
+    pub filename: String,
 }
 
 #[derive(Debug)]
@@ -260,6 +270,7 @@ pub struct AppState {
     /// Monotonic counter bumped on every account switch / login / restore.
     /// Included in the SDK event subscription hash so Iced recreates the stream.
     pub session_epoch: u64,
+    pub media_downloads_inflight: HashSet<u64>,
     next_open_token: OpenToken,
 }
 
@@ -297,6 +308,7 @@ impl AppState {
             overlay: OverlayState::default(),
             switch_account: SwitchAccountState::default(),
             session_epoch: 0,
+            media_downloads_inflight: HashSet::new(),
             next_open_token: 1,
         }
     }
@@ -306,7 +318,6 @@ impl AppState {
         self.next_open_token = self.next_open_token.saturating_add(1);
         token
     }
-
 }
 
 impl Default for AppState {

@@ -29,6 +29,14 @@ pub struct ServerConfig {
 }
 
 fn resolve_config_dir() -> PathBuf {
+    // 编译时引入源码目录的 config/ 路径
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let manifest_config = PathBuf::from(manifest_dir).join("config");
+    if manifest_config.exists() {
+        return manifest_config;
+    }
+
+    // 打包后从 exe 旁边找
     if let Ok(exe_path) = env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let parent_name = parent.file_name().map(|n| n.to_string_lossy());
@@ -43,7 +51,7 @@ fn resolve_config_dir() -> PathBuf {
             return parent.join("config");
         }
     }
-    PathBuf::from("config")
+    manifest_config
 }
 
 pub fn load_app_config() -> anyhow::Result<(String, AppConfig)> {
