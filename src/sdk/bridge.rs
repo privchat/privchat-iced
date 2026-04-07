@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -400,6 +401,61 @@ impl PrivchatSdkBridge {
         })
     }
 
+    async fn get_or_fetch_user_by_id(
+        &self,
+        user_id: u64,
+    ) -> Result<Option<privchat_sdk::StoredUser>, UiError> {
+        if let Some(user) = self
+            .sdk
+            .get_user_by_id(user_id)
+            .await
+            .map_err(map_sdk_error)?
+        {
+            return Ok(Some(user));
+        }
+
+        let remote: Option<AccountUserDetailResponse> = self
+            .sdk
+            .rpc_call_typed(
+                routes::account_user::DETAIL,
+                &AccountUserDetailRequest {
+                    target_user_id: user_id,
+                    source: "session_title_repair".to_string(),
+                    source_id: user_id.to_string(),
+                    user_id: 0,
+                },
+            )
+            .await
+            .ok();
+
+        let Some(remote) = remote else {
+            return Ok(None);
+        };
+
+        let updated_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        self.sdk
+            .upsert_user(privchat_sdk::UpsertUserInput {
+                user_id,
+                username: Some(remote.username).filter(|s| !s.trim().is_empty()),
+                nickname: Some(remote.nickname).filter(|s| !s.trim().is_empty()),
+                alias: None,
+                avatar: remote.avatar_url.unwrap_or_default(),
+                user_type: remote.user_type as i32,
+                is_deleted: false,
+                channel_id: String::new(),
+                version: 0,
+                updated_at,
+            })
+            .await
+            .map_err(map_sdk_error)?;
+
+        self.sdk.get_user_by_id(user_id).await.map_err(map_sdk_error)
+    }
+
     fn map_friend_item(friend: StoredFriend) -> FriendListItemVm {
         let title = choose_display_name(
             friend.alias.as_deref(),
@@ -536,16 +592,28 @@ impl SdkBridge for PrivchatSdkBridge {
         );
 
         let mut items = Vec::with_capacity(channels.len());
+        let mut did_entity_repair_sync = false;
         for channel in &channels {
             let mut item = adapter::map_channel_to_session_item(channel);
             if let Some(peer_user_id) = infer_direct_peer_user_id(channel, &item.title, current_uid)
             {
-                if let Some(user) = self
-                    .sdk
-                    .get_user_by_id(peer_user_id)
-                    .await
-                    .map_err(map_sdk_error)?
-                {
+                let mut user = self.get_or_fetch_user_by_id(peer_user_id).await?;
+                if user.is_none() && !did_entity_repair_sync {
+                    did_entity_repair_sync = true;
+                    for entity in ["user", "friend", "channel"] {
+                        if let Err(error) =
+                            self.sdk.sync_entities(entity.to_string(), None).await
+                        {
+                            tracing::warn!(
+                                "session title repair sync failed: entity={} error={}",
+                                entity,
+                                error
+                            );
+                        }
+                    }
+                    user = self.get_or_fetch_user_by_id(peer_user_id).await?;
+                }
+                if let Some(user) = user {
                     item.title = choose_display_name(
                         user.alias.as_deref(),
                         user.nickname.as_deref(),
