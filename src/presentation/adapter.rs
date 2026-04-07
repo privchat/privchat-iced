@@ -247,23 +247,7 @@ fn resolve_local_media_path(
 
     let filename = guess_filename(body, metadata);
     let yyyymm = yyyymm_from_timestamp_ms(created_at);
-    let mut candidate_dir_names = vec![message_id.to_string()];
-    if let Some(meta) = metadata {
-        // Canonical priority: always resolve original file id first.
-        // Thumbnail id is only a fallback for legacy rows.
-        for key in ["file_id", "thumbnail_file_id"] {
-            let id = meta.get(key).and_then(|v| {
-                v.as_u64()
-                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
-            });
-            if let Some(id) = id {
-                let name = id.to_string();
-                if !candidate_dir_names.iter().any(|existing| existing == &name) {
-                    candidate_dir_names.push(name);
-                }
-            }
-        }
-    }
+    let message_dir_name = message_id.to_string();
 
     for root in sdk_storage_roots() {
         let users_root = root.join("users");
@@ -285,37 +269,35 @@ fn resolve_local_media_path(
         }
 
         for uid in uid_candidates {
-            for dir_name in &candidate_dir_names {
-                let message_dir = users_root
-                    .join(&uid)
-                    .join("files")
-                    .join(&yyyymm)
-                    .join(dir_name);
+            let message_dir = users_root
+                .join(&uid)
+                .join("files")
+                .join(&yyyymm)
+                .join(&message_dir_name);
 
-                if let Some(filename) = filename.as_ref() {
-                    let candidate = message_dir.join(filename);
-                    if candidate.exists() {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
+            if let Some(filename) = filename.as_ref() {
+                let candidate = message_dir.join(filename);
+                if candidate.exists() {
+                    return Some(candidate.to_string_lossy().to_string());
                 }
+            }
 
-                // Fallback: filename may be absent in legacy payload; pick first non-meta file.
-                if let Ok(entries) = std::fs::read_dir(&message_dir) {
-                    for entry in entries.flatten() {
-                        let path = entry.path();
-                        if !path.is_file() {
-                            continue;
-                        }
-                        let name = path
-                            .file_name()
-                            .and_then(|v| v.to_str())
-                            .unwrap_or_default()
-                            .to_ascii_lowercase();
-                        if name == "meta.json" || name.is_empty() {
-                            continue;
-                        }
-                        return Some(path.to_string_lossy().to_string());
+            // Fallback: filename may be absent in payload; pick first non-meta file.
+            if let Ok(entries) = std::fs::read_dir(&message_dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
                     }
+                    let name = path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or_default()
+                        .to_ascii_lowercase();
+                    if name == "meta.json" || name.is_empty() {
+                        continue;
+                    }
+                    return Some(path.to_string_lossy().to_string());
                 }
             }
         }
