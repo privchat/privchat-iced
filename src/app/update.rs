@@ -601,7 +601,7 @@ pub fn update(
                 .as_ref()
                 .map(|chat| chat.timeline.items.clone())
                 .unwrap_or_default();
-            let media_tasks = schedule_thumbnail_downloads_for_items(state, &media_items);
+            let media_tasks = schedule_thumbnail_downloads_for_items(state, &media_items, bridge);
             clear_local_unread_for_channel(state, channel_id, channel_type);
             let last_read_pts = state
                 .active_chat
@@ -955,7 +955,9 @@ pub fn update(
                             message_id,
                             local_path: path,
                         },
-                        Err(error) => AppMessage::MediaThumbnailDownloadFailed { message_id, error },
+                        Err(error) => {
+                            AppMessage::MediaThumbnailDownloadFailed { message_id, error }
+                        }
                     },
                 );
             }
@@ -971,7 +973,8 @@ pub fn update(
             filename,
         } => Task::perform(
             async move {
-                let path = ensure_attachment_local_path(local_path, remote_url, filename, None).await?;
+                let path =
+                    ensure_attachment_local_path(local_path, remote_url, filename, None).await?;
                 open_with_system(&path)?;
                 Ok(path)
             },
@@ -1211,7 +1214,7 @@ pub fn update(
         } => {
             let media_tasks = message
                 .as_ref()
-                .map(|item| schedule_thumbnail_download_for_message(state, item))
+                .map(|item| schedule_thumbnail_download_for_message(state, item, bridge))
                 .into_iter()
                 .flatten()
                 .collect::<Vec<_>>();
@@ -1293,7 +1296,7 @@ pub fn update(
                 }
             }
             if let Some(items) = media_items {
-                let media_tasks = schedule_thumbnail_downloads_for_items(state, &items);
+                let media_tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
                 if should_refresh_unread {
                     let mut tasks = media_tasks;
                     tasks.push(schedule_total_unread_refresh(bridge));
@@ -1331,7 +1334,7 @@ pub fn update(
                 media_items = Some(chat.timeline.items.clone());
             }
             if let Some(items) = media_items {
-                let tasks = schedule_thumbnail_downloads_for_items(state, &items);
+                let tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
                 return Task::batch(tasks);
             }
             Task::none()
@@ -1749,6 +1752,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             body: body.clone(),
             message_type: TEXT_MESSAGE_TYPE,
             media_url: None,
+            media_file_id: None,
             media_local_path: None,
             media_file_size: None,
             created_at: now,
@@ -1863,6 +1867,7 @@ fn handle_send_attachment_path(
             body: preview.clone(),
             message_type,
             media_url: None,
+            media_file_id: None,
             media_local_path: if message_type == IMAGE_MESSAGE_TYPE {
                 Some(file_path.clone())
             } else {
@@ -2413,8 +2418,9 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
                 warn!("ignore ReplaceLocalEcho without server_message_id");
                 return false;
             };
-            let preserved_local_path = find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
-                .and_then(|index| chat.timeline.items[index].media_local_path.clone());
+            let preserved_local_path =
+                find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
+                    .and_then(|index| chat.timeline.items[index].media_local_path.clone());
             if remote.media_local_path.is_none() {
                 remote.media_local_path = preserved_local_path;
             }
@@ -2613,30 +2619,58 @@ fn format_ui_error(error: &crate::presentation::vm::UiError) -> String {
 fn schedule_thumbnail_downloads_for_items(
     state: &mut AppState,
     items: &[MessageVm],
+    bridge: &Arc<dyn SdkBridge>,
 ) -> Vec<Task<AppMessage>> {
-    items
+    const DOWNLOAD_WINDOW: usize = 48;
+    let start = items.len().saturating_sub(DOWNLOAD_WINDOW);
+    items[start..]
         .iter()
-        .filter_map(|item| schedule_thumbnail_download_for_message(state, item))
+        .filter_map(|item| schedule_thumbnail_download_for_message(state, item, bridge))
         .collect()
 }
 
 fn schedule_thumbnail_download_for_message(
     state: &mut AppState,
     item: &MessageVm,
+    bridge: &Arc<dyn SdkBridge>,
 ) -> Option<Task<AppMessage>> {
     if item.message_type != IMAGE_MESSAGE_TYPE {
         return None;
     }
-    // Do not auto-download thumbnails while rendering timeline.
-    // Spec-driven behavior for iced: local-first media rendering from SDK-managed user storage.
-    // Network fetch should happen only on explicit user action (open/download).
     if let Some(local_path) = item.media_local_path.as_ref() {
         if Path::new(local_path).exists() {
             return None;
         }
     }
-    let _ = state.media_downloads_inflight.remove(&item.message_id);
-    None
+    let file_id = item.media_file_id?;
+    let user_id = state.auth.user_id?;
+    if !state.media_downloads_inflight.insert(item.message_id) {
+        return None;
+    }
+
+    let bridge = Arc::clone(bridge);
+    let message_id = item.message_id;
+    let target_path = media_thumbnail_cache_path(
+        user_id,
+        item.created_at,
+        message_id,
+        &format!("file_{file_id}"),
+    )
+    .to_string_lossy()
+    .to_string();
+    Some(Task::perform(
+        async move {
+            let url = bridge.get_file_url(file_id).await?;
+            download_image_thumbnail(message_id, url, target_path).await
+        },
+        move |result| match result {
+            Ok(local_path) => AppMessage::MediaThumbnailDownloaded {
+                message_id,
+                local_path,
+            },
+            Err(error) => AppMessage::MediaThumbnailDownloadFailed { message_id, error },
+        },
+    ))
 }
 
 fn infer_file_extension(url: &str) -> &'static str {
@@ -2655,17 +2689,30 @@ async fn download_image_thumbnail(
     url: String,
     target_path: String,
 ) -> Result<String, crate::presentation::vm::UiError> {
-    let response = reqwest::get(&url).await.map_err(|error| {
-        crate::presentation::vm::UiError::Unknown(format!("download thumbnail failed: {error}"))
-    })?;
-    let response = response.error_for_status().map_err(|error| {
-        crate::presentation::vm::UiError::Unknown(format!(
-            "download thumbnail bad status: {error}"
-        ))
-    })?;
-    let bytes = response.bytes().await.map_err(|error| {
-        crate::presentation::vm::UiError::Unknown(format!("read thumbnail body failed: {error}"))
-    })?;
+    let response = match reqwest::get(&url).await {
+        Ok(resp) => resp,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "error sending request for url ({url}): {error}"
+            )));
+        }
+    };
+    let response = match response.error_for_status() {
+        Ok(resp) => resp,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "download thumbnail bad status for url ({url}): {error}"
+            )));
+        }
+    };
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "read thumbnail body failed for url ({url}): {error}"
+            )));
+        }
+    };
 
     let file_path = PathBuf::from(target_path);
     if let Some(parent) = file_path.parent() {
@@ -2732,49 +2779,30 @@ async fn ensure_attachment_local_path(
         crate::presentation::vm::UiError::Unknown("attachment download url missing".to_string())
     })?;
 
-    let mut candidate_urls = vec![url.clone()];
-    if let Some((head, tail)) = url.split_once("/api/app/files/") {
-        if !head.ends_with("/files") {
-            candidate_urls.push(format!("{head}/files/api/app/files/{tail}"));
+    let response = match reqwest::get(&url).await {
+        Ok(resp) => resp,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "error sending request for url ({url}): {error}"
+            )));
         }
-    }
-    if let Some((head, tail)) = url.split_once("/files/api/app/files/") {
-        candidate_urls.push(format!("{head}/api/app/files/{tail}"));
-    }
-    candidate_urls.dedup();
-
-    let mut last_error = String::new();
-    let mut bytes_opt = None;
-    for candidate in candidate_urls {
-        let response = match reqwest::get(&candidate).await {
-            Ok(resp) => resp,
-            Err(error) => {
-                last_error = format!("error sending request for url ({candidate}): {error}");
-                continue;
-            }
-        };
-        let response = match response.error_for_status() {
-            Ok(resp) => resp,
-            Err(error) => {
-                last_error = format!("download bad status for url ({candidate}): {error}");
-                continue;
-            }
-        };
-        match response.bytes().await {
-            Ok(bytes) => {
-                bytes_opt = Some(bytes);
-                break;
-            }
-            Err(error) => {
-                last_error = format!("read body failed for url ({candidate}): {error}");
-            }
+    };
+    let response = match response.error_for_status() {
+        Ok(resp) => resp,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "download bad status for url ({url}): {error}"
+            )));
         }
-    }
-    let bytes = bytes_opt.ok_or_else(|| {
-        crate::presentation::vm::UiError::Unknown(format!(
-            "download attachment failed: {last_error}"
-        ))
-    })?;
+    };
+    let bytes = match response.bytes().await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return Err(crate::presentation::vm::UiError::Unknown(format!(
+                "read body failed for url ({url}): {error}"
+            )));
+        }
+    };
 
     let target_path = if let Some(path) = save_to {
         Path::new(&path).to_path_buf()
@@ -2800,7 +2828,9 @@ async fn ensure_attachment_local_path(
 
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
-            crate::presentation::vm::UiError::Unknown(format!("create target directory failed: {error}"))
+            crate::presentation::vm::UiError::Unknown(format!(
+                "create target directory failed: {error}"
+            ))
         })?;
     }
     fs::write(&target_path, &bytes).map_err(|error| {

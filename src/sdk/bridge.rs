@@ -9,10 +9,10 @@ use iced::Subscription;
 use privchat_protocol::message::ContentMessageType;
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
-    AccountUserDetailResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
-    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse,
-    GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
-    MessageStatusReadPtsResponse,
+    AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendApplyRequest,
+    FriendApplyResponse, FriendPendingRequest, FriendPendingResponse, GetChannelPtsRequest,
+    GetChannelPtsResponse, GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse,
+    MessageStatusReadPtsRequest, MessageStatusReadPtsResponse,
 };
 use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredFriend};
 use tokio::sync::broadcast::error::RecvError;
@@ -166,6 +166,8 @@ pub trait SdkBridge: Send + Sync + 'static {
         channel_type: i32,
         last_read_pts: u64,
     ) -> Result<(), UiError>;
+
+    async fn get_file_url(&self, file_id: u64) -> Result<String, UiError>;
 
     fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent>;
 }
@@ -823,29 +825,29 @@ impl SdkBridge for PrivchatSdkBridge {
                     .into_iter()
                     .find(|entry| entry.from_user_id == user_id || entry.user.user_id == user_id);
 
-                let (resolved_user_id, username, nickname, alias) = if let Some(entry) = &request_entry
-                {
-                    let user = &entry.user;
-                    (
-                        user.user_id,
-                        non_empty(Some(user.username.as_str())),
-                        non_empty(Some(user.nickname.as_str())),
-                        None::<String>,
-                    )
-                } else {
-                    let user = self
-                        .sdk
-                        .get_user_by_id(user_id)
-                        .await
-                        .map_err(map_sdk_error)?
-                        .ok_or_else(|| UiError::Unknown(format!("用户不存在: {user_id}")))?;
-                    (
-                        user.user_id,
-                        user.username.as_deref().and_then(|v| non_empty(Some(v))),
-                        user.nickname.as_deref().and_then(|v| non_empty(Some(v))),
-                        user.alias.as_deref().and_then(|v| non_empty(Some(v))),
-                    )
-                };
+                let (resolved_user_id, username, nickname, alias) =
+                    if let Some(entry) = &request_entry {
+                        let user = &entry.user;
+                        (
+                            user.user_id,
+                            non_empty(Some(user.username.as_str())),
+                            non_empty(Some(user.nickname.as_str())),
+                            None::<String>,
+                        )
+                    } else {
+                        let user = self
+                            .sdk
+                            .get_user_by_id(user_id)
+                            .await
+                            .map_err(map_sdk_error)?
+                            .ok_or_else(|| UiError::Unknown(format!("用户不存在: {user_id}")))?;
+                        (
+                            user.user_id,
+                            user.username.as_deref().and_then(|v| non_empty(Some(v))),
+                            user.nickname.as_deref().and_then(|v| non_empty(Some(v))),
+                            user.alias.as_deref().and_then(|v| non_empty(Some(v))),
+                        )
+                    };
 
                 let title = choose_display_name(
                     alias.as_deref(),
@@ -1364,6 +1366,21 @@ impl SdkBridge for PrivchatSdkBridge {
             read_pts
         );
         Ok(())
+    }
+
+    async fn get_file_url(&self, file_id: u64) -> Result<String, UiError> {
+        let response: FileGetUrlResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::file::GET_URL,
+                &FileGetUrlRequest {
+                    file_id,
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(response.file_url)
     }
 
     fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent> {

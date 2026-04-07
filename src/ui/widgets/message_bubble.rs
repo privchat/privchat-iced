@@ -27,7 +27,11 @@ fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static 
 }
 
 /// Render one timeline row in a WeChat-like bubble style.
-pub fn view(message: &MessageVm, opened_menu_message_id: Option<u64>) -> Element<'_, AppMessage> {
+pub fn view(
+    message: &MessageVm,
+    opened_menu_message_id: Option<u64>,
+    render_media_preview: bool,
+) -> Element<'_, AppMessage> {
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
     } else {
@@ -79,7 +83,7 @@ pub fn view(message: &MessageVm, opened_menu_message_id: Option<u64>) -> Element
     };
 
     let content: Element<'_, AppMessage> = if message.message_type == IMAGE_MESSAGE_TYPE {
-        if message.media_local_path.is_some() || message.media_url.is_some() {
+        if render_media_preview && (message.media_local_path.is_some() || message.media_url.is_some()) {
             let preview: Element<'_, AppMessage> = if let Some(local_path) = &message.media_local_path
             {
                 image(local_path.clone())
@@ -110,6 +114,22 @@ pub fn view(message: &MessageVm, opened_menu_message_id: Option<u64>) -> Element
                 local_path: message.media_local_path.clone(),
                 remote_url: message.media_url.clone(),
                 filename: Some(message.body.clone()),
+            })
+            .into()
+        } else if message.media_local_path.is_some() || message.media_url.is_some() {
+            container(
+                text("[图片]")
+                    .size(14)
+                    .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
+            )
+            .width(Length::Fixed(220.0))
+            .height(Length::Fixed(64.0))
+            .align_x(alignment::Horizontal::Center)
+            .align_y(alignment::Vertical::Center)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
+                border: border::rounded(8.0),
+                ..container::Style::default()
             })
             .into()
         } else {

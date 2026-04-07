@@ -1,7 +1,7 @@
-use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 use privchat_protocol::message::{
     ContentMessageType, FileLikeMetadata, ImageMetadata, MessagePayloadEnvelope,
 };
+use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 use std::path::{Path, PathBuf};
 
 use crate::presentation::vm::{
@@ -82,7 +82,10 @@ fn prettify_media_body(body: String, message_type: i32) -> String {
     if body.is_empty() {
         return body;
     }
-    if !matches!(message_type, IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE) {
+    if !matches!(
+        message_type,
+        IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE
+    ) {
         return body;
     }
     let path = std::path::Path::new(&body);
@@ -170,7 +173,9 @@ fn infer_type_from_filename_like(text: &str) -> Option<i32> {
     if image_exts.contains(&ext.as_str()) {
         return Some(IMAGE_MESSAGE_TYPE);
     }
-    let video_exts = ["mp4", "mov", "m4v", "mkv", "avi", "webm", "flv", "3gp", "ts"];
+    let video_exts = [
+        "mp4", "mov", "m4v", "mkv", "avi", "webm", "flv", "3gp", "ts",
+    ];
     if video_exts.contains(&ext.as_str()) {
         return Some(VIDEO_MESSAGE_TYPE);
     }
@@ -240,40 +245,76 @@ fn resolve_local_media_path(
         return Some(body.to_string());
     }
 
-    let uid = current_uid?;
     let filename = guess_filename(body, metadata);
     let yyyymm = yyyymm_from_timestamp_ms(created_at);
+    let mut candidate_dir_names = vec![message_id.to_string()];
+    if let Some(meta) = metadata {
+        for key in ["thumbnail_file_id", "file_id"] {
+            let id = meta.get(key).and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            });
+            if let Some(id) = id {
+                let name = id.to_string();
+                if !candidate_dir_names.iter().any(|existing| existing == &name) {
+                    candidate_dir_names.push(name);
+                }
+            }
+        }
+    }
 
     for root in sdk_storage_roots() {
-        let message_dir = root
-            .join("users")
-            .join(uid.to_string())
-            .join("files")
-            .join(&yyyymm)
-            .join(message_id.to_string());
-        if let Some(filename) = filename.as_ref() {
-            let candidate = message_dir.join(filename);
-            if candidate.exists() {
-                return Some(candidate.to_string_lossy().to_string());
+        let users_root = root.join("users");
+        let mut uid_candidates = Vec::new();
+        if let Some(uid) = current_uid {
+            uid_candidates.push(uid.to_string());
+        }
+        if let Ok(entries) = std::fs::read_dir(&users_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(name) = path.file_name().and_then(|v| v.to_str()) {
+                        if !uid_candidates.iter().any(|existing| existing == name) {
+                            uid_candidates.push(name.to_string());
+                        }
+                    }
+                }
             }
         }
 
-        // Fallback: filename may be absent in legacy payload; pick first non-meta file.
-        if let Ok(entries) = std::fs::read_dir(&message_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() {
-                    continue;
+        for uid in uid_candidates {
+            for dir_name in &candidate_dir_names {
+                let message_dir = users_root
+                    .join(&uid)
+                    .join("files")
+                    .join(&yyyymm)
+                    .join(dir_name);
+
+                if let Some(filename) = filename.as_ref() {
+                    let candidate = message_dir.join(filename);
+                    if candidate.exists() {
+                        return Some(candidate.to_string_lossy().to_string());
+                    }
                 }
-                let name = path
-                    .file_name()
-                    .and_then(|v| v.to_str())
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                if name == "meta.json" || name.is_empty() {
-                    continue;
+
+                // Fallback: filename may be absent in legacy payload; pick first non-meta file.
+                if let Ok(entries) = std::fs::read_dir(&message_dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if !path.is_file() {
+                            continue;
+                        }
+                        let name = path
+                            .file_name()
+                            .and_then(|v| v.to_str())
+                            .unwrap_or_default()
+                            .to_ascii_lowercase();
+                        if name == "meta.json" || name.is_empty() {
+                            continue;
+                        }
+                        return Some(path.to_string_lossy().to_string());
+                    }
                 }
-                return Some(path.to_string_lossy().to_string());
             }
         }
     }
@@ -287,12 +328,12 @@ fn extract_media_info(
     current_uid: Option<u64>,
     message_id: u64,
     created_at: i64,
-) -> (Option<String>, Option<String>) {
+) -> (Option<String>, Option<String>, Option<u64>) {
     if !matches!(
         message_type,
         IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE
     ) {
-        return (None, None);
+        return (None, None, None);
     }
 
     let body = extract_body(content);
@@ -322,6 +363,21 @@ fn extract_media_info(
                         .and_then(|v| v.as_str())
                         .or_else(|| m.get("file_url").and_then(|v| v.as_str()))
                         .or_else(|| m.get("url").and_then(|v| v.as_str()))
+                        .or_else(|| {
+                            m.get("source")
+                                .and_then(|v| v.get("thumbnail_url"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .or_else(|| {
+                            m.get("source")
+                                .and_then(|v| v.get("file_url"))
+                                .and_then(|v| v.as_str())
+                        })
+                        .or_else(|| {
+                            m.get("source")
+                                .and_then(|v| v.get("url"))
+                                .and_then(|v| v.as_str())
+                        })
                 })
                 .map(str::to_string)
         });
@@ -331,15 +387,29 @@ fn extract_media_info(
         .filter(|v| !v.trim().is_empty());
     let file_id_from_metadata = metadata
         .and_then(|m| {
-            m.get("thumbnail_file_id")
-                .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+            m.get("thumbnail_file_id").and_then(|v| {
+                v.as_u64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+            })
         })
         .or_else(|| typed_file_meta.as_ref().map(|m| m.file_id))
         .or_else(|| typed_image_meta.as_ref().map(|m| m.file_id))
         .or_else(|| {
             metadata.and_then(|m| {
-                m.get("file_id")
-                    .and_then(|v| v.as_u64().or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok())))
+                m.get("file_id").and_then(|v| {
+                    v.as_u64()
+                        .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                })
+            })
+        })
+        .or_else(|| {
+            metadata.and_then(|m| {
+                m.get("source")
+                    .and_then(|v| v.get("file_id"))
+                    .and_then(|v| {
+                        v.as_u64()
+                            .or_else(|| v.as_str().and_then(|s| s.parse::<u64>().ok()))
+                    })
             })
         });
     let resolved_url = direct_url.or_else(|| {
@@ -350,7 +420,7 @@ fn extract_media_info(
     });
 
     let local_path = resolve_local_media_path(&body, metadata, current_uid, message_id, created_at);
-    (local_path, resolved_url)
+    (local_path, resolved_url, file_id_from_metadata)
 }
 
 fn extract_media_file_size(content: &str, extra: &str) -> Option<u64> {
@@ -456,7 +526,7 @@ pub fn map_stored_message_to_vm(
         send_state = Some(MessageSendStateVm::Sent);
     }
 
-    let (media_local_path, media_url) = extract_media_info(
+    let (media_local_path, media_url, media_file_id) = extract_media_info(
         &message.content,
         &message.extra,
         message.message_type,
@@ -477,6 +547,7 @@ pub fn map_stored_message_to_vm(
         body: prettify_media_body(extract_body(&message.content), message.message_type),
         message_type: message.message_type,
         media_url,
+        media_file_id,
         media_local_path,
         media_file_size,
         created_at: message.created_at,

@@ -6,6 +6,7 @@ use crate::app::state::TimelineState;
 use crate::ui::widgets::message_bubble;
 
 const C_CHAT_BG: Color = Color::from_rgb8(0x18, 0x1A, 0x1F);
+const MEDIA_PREVIEW_WINDOW: usize = 48;
 
 /// Render the scrollable timeline in a WeChat-like visual style.
 pub fn view(
@@ -21,8 +22,17 @@ pub fn view(
     }
 
     if !timeline.items.is_empty() {
-        for message in &timeline.items {
-            list = list.push(message_bubble::view(message, opened_menu_message_id));
+        let start_media_index = timeline
+            .items
+            .len()
+            .saturating_sub(MEDIA_PREVIEW_WINDOW);
+        for (index, message) in timeline.items.iter().enumerate() {
+            let render_media_preview = index >= start_media_index;
+            list = list.push(message_bubble::view(
+                message,
+                opened_menu_message_id,
+                render_media_preview,
+            ));
         }
     }
 
