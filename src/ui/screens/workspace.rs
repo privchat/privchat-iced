@@ -41,7 +41,10 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     let detail: Element<'_, AppMessage> = match state.route {
         Route::Chat => {
             if let Some(chat_state) = &state.active_chat {
-                chat::view(chat_state, active_title)
+                let active_presence = chat_state
+                    .peer_user_id
+                    .and_then(|user_id| state.presences.get(&user_id));
+                chat::view(chat_state, active_title, active_presence)
             } else {
                 empty_detail("请选择一个会话")
             }
@@ -56,11 +59,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
 
     let middle_panel: Element<'_, AppMessage> = match state.route {
         Route::AddFriend => add_friend::panel_view(&state.add_friend),
-        _ => session_list::view(
-            &state.session_list,
-            active_chat,
-            state.layout.session_list_width,
-        ),
+        _ => session_list::view(state, active_chat, state.layout.session_list_width),
     };
 
     let workspace = container(

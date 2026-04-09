@@ -3,8 +3,9 @@ use iced::window;
 
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
-    GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, SearchUserVm,
-    SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm, UiError,
+    GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, PresenceVm,
+    SearchUserVm, SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm,
+    UiError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +42,12 @@ pub enum AppMessage {
     RefreshAddFriendData,
     AddFriendFriendsLoaded {
         items: Vec<FriendListItemVm>,
+    },
+    FriendPresencesLoaded {
+        items: Vec<PresenceVm>,
+    },
+    FriendPresencesLoadFailed {
+        error: UiError,
     },
     AddFriendFriendsLoadFailed {
         error: UiError,
@@ -176,6 +183,21 @@ pub enum AppMessage {
         channel_type: i32,
         open_token: OpenToken,
         error: UiError,
+    },
+    ChatPresenceLoaded {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        presence: Option<PresenceVm>,
+    },
+    ChatPresenceLoadFailed {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        error: UiError,
+    },
+    PresenceChanged {
+        presence: PresenceVm,
     },
     RetryOpenConversation {
         channel_id: u64,

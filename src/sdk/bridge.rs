@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use iced::futures::SinkExt;
@@ -16,7 +16,9 @@ use privchat_protocol::rpc::{
     GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
     MessageStatusReadPtsResponse,
 };
-use privchat_sdk::{NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend};
+use privchat_sdk::{
+    NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend,
+};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::app::reporting::{self, MarkReadPtsSource};
@@ -25,7 +27,7 @@ use crate::presentation::adapter;
 use crate::presentation::vm::{
     AddFriendDetailFieldVm, AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm,
     FriendRequestItemVm, GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, MessageVm,
-    SearchUserVm, SessionListItemVm, TimelineSnapshotVm, UiError,
+    PresenceVm, SearchUserVm, SessionListItemVm, TimelineSnapshotVm, UiError,
 };
 
 fn map_sdk_error(err: privchat_sdk::Error) -> UiError {
@@ -142,6 +144,7 @@ pub trait SdkBridge: Send + Sync + 'static {
     ) -> Result<u64, UiError>;
     async fn accept_friend_request(&self, from_user_id: u64) -> Result<u64, UiError>;
     async fn load_friend_list(&self) -> Result<Vec<FriendListItemVm>, UiError>;
+    async fn batch_get_presence(&self, user_ids: Vec<u64>) -> Result<Vec<PresenceVm>, UiError>;
     async fn load_group_list(&self) -> Result<Vec<GroupListItemVm>, UiError>;
     async fn load_friend_request_list(&self) -> Result<Vec<FriendRequestItemVm>, UiError>;
     async fn load_add_friend_detail(
@@ -166,6 +169,7 @@ pub trait SdkBridge: Send + Sync + 'static {
         channel_id: u64,
         channel_type: i32,
     ) -> Result<TimelineSnapshotVm, UiError>;
+    async fn subscribe_channel(&self, channel_id: u64, channel_type: i32) -> Result<(), UiError>;
 
     async fn send_text_message(
         &self,
@@ -453,7 +457,10 @@ impl PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
 
-        self.sdk.get_user_by_id(user_id).await.map_err(map_sdk_error)
+        self.sdk
+            .get_user_by_id(user_id)
+            .await
+            .map_err(map_sdk_error)
     }
 
     fn map_friend_item(friend: StoredFriend) -> FriendListItemVm {
@@ -472,6 +479,7 @@ impl PrivchatSdkBridge {
             title,
             subtitle,
             is_added: true,
+            is_online: false,
         }
     }
 
@@ -601,9 +609,7 @@ impl SdkBridge for PrivchatSdkBridge {
                 if user.is_none() && !did_entity_repair_sync {
                     did_entity_repair_sync = true;
                     for entity in ["user", "friend", "channel"] {
-                        if let Err(error) =
-                            self.sdk.sync_entities(entity.to_string(), None).await
-                        {
+                        if let Err(error) = self.sdk.sync_entities(entity.to_string(), None).await {
                             tracing::warn!(
                                 "session title repair sync failed: entity={} error={}",
                                 entity,
@@ -621,6 +627,7 @@ impl SdkBridge for PrivchatSdkBridge {
                         item.title.clone(),
                     );
                 }
+                item.peer_user_id = Some(peer_user_id);
             }
             items.push(item);
         }
@@ -803,6 +810,23 @@ impl SdkBridge for PrivchatSdkBridge {
 
         items.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         Ok(items)
+    }
+
+    async fn batch_get_presence(&self, user_ids: Vec<u64>) -> Result<Vec<PresenceVm>, UiError> {
+        let statuses = self
+            .sdk
+            .batch_get_presence(user_ids)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(statuses
+            .into_iter()
+            .map(|status| PresenceVm {
+                user_id: status.user_id,
+                is_online: status.is_online,
+                last_seen_at: status.last_seen_at,
+                device_count: status.device_count,
+            })
+            .collect())
     }
 
     async fn accept_friend_request(&self, from_user_id: u64) -> Result<u64, UiError> {
@@ -1175,6 +1199,15 @@ impl SdkBridge for PrivchatSdkBridge {
             0,
             unread_marker,
         ))
+    }
+
+    async fn subscribe_channel(&self, channel_id: u64, channel_type: i32) -> Result<(), UiError> {
+        let channel_type = u8::try_from(channel_type)
+            .map_err(|_| UiError::Unknown(format!("invalid channel_type: {channel_type}")))?;
+        self.sdk
+            .subscribe_channel(channel_id, channel_type, None)
+            .await
+            .map_err(map_sdk_error)
     }
 
     async fn send_text_message(

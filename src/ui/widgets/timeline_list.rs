@@ -22,10 +22,7 @@ pub fn view(
     }
 
     if !timeline.items.is_empty() {
-        let start_media_index = timeline
-            .items
-            .len()
-            .saturating_sub(MEDIA_PREVIEW_WINDOW);
+        let start_media_index = timeline.items.len().saturating_sub(MEDIA_PREVIEW_WINDOW);
         for (index, message) in timeline.items.iter().enumerate() {
             let render_media_preview = index >= start_media_index;
             list = list.push(message_bubble::view(

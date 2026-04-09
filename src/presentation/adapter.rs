@@ -454,6 +454,7 @@ pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm
     SessionListItemVm {
         channel_id: channel.channel_id,
         channel_type: channel.channel_type,
+        peer_user_id: None,
         title: channel_display_title(channel),
         subtitle,
         unread_count: channel.unread_count.max(0) as u32,

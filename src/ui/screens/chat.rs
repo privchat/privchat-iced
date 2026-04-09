@@ -3,6 +3,7 @@ use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
 use crate::app::state::ChatScreenState;
+use crate::presentation::vm::PresenceVm;
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets::{composer, timeline_list, unread_banner};
 
@@ -10,16 +11,27 @@ const C_HEADER_BG: Color = Color::from_rgb8(0x1A, 0x1D, 0x22);
 const C_CHAT_BG: Color = Color::from_rgb8(0x18, 0x1A, 0x1F);
 const C_COMPOSER_BG: Color = Color::from_rgb8(0x14, 0x17, 0x1B);
 const C_DIVIDER: Color = Color::from_rgb8(0x2A, 0x2E, 0x34);
+const C_STATUS_ONLINE: Color = Color::from_rgb8(0x22, 0xC5, 0x5E);
+const C_STATUS_OFFLINE: Color = Color::from_rgb8(0x95, 0x9D, 0xA6);
 const COMPOSER_HEIGHT: f32 = 184.0;
 const EMOJI_POPUP_BOTTOM_OFFSET: f32 = 160.0;
 
 /// Render WeChat-like right chat pane.
-pub fn view<'a>(chat: &'a ChatScreenState, title: &'a str) -> Element<'a, AppMessage> {
+pub fn view<'a>(
+    chat: &'a ChatScreenState,
+    title: &'a str,
+    presence: Option<&'a PresenceVm>,
+) -> Element<'a, AppMessage> {
+    let header_title = column![
+        text(title)
+            .size(17)
+            .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+        presence_status_text(presence),
+    ]
+    .spacing(3);
     let header = container(
         row![
-            text(title)
-                .size(17)
-                .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+            header_title,
             container(
                 row![
                     icons::render(
@@ -143,4 +155,33 @@ pub fn view<'a>(chat: &'a ChatScreenState, title: &'a str) -> Element<'a, AppMes
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+}
+
+fn presence_status_text<'a>(presence: Option<&'a PresenceVm>) -> Element<'a, AppMessage> {
+    let Some(presence) = presence else {
+        return container(text("")).into();
+    };
+
+    let (label, color) = if presence.is_online {
+        ("在线".to_string(), C_STATUS_ONLINE)
+    } else if presence.last_seen_at > 0 {
+        (
+            format!("最近在线 {}", format_presence_time(presence.last_seen_at)),
+            C_STATUS_OFFLINE,
+        )
+    } else {
+        ("离线".to_string(), C_STATUS_OFFLINE)
+    };
+
+    text(label).size(12).color(color).into()
+}
+
+fn format_presence_time(timestamp_ms: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%m-%d %H:%M")
+                .to_string()
+        })
+        .unwrap_or_else(|| "--:--".to_string())
 }

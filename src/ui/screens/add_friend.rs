@@ -19,6 +19,7 @@ const C_DIVIDER: Color = Color::from_rgb8(0x35, 0x39, 0x40);
 const C_POPUP_BG: Color = Color::from_rgb8(0x24, 0x26, 0x2C);
 const C_POPUP_CARD_BG: Color = Color::from_rgb8(0x2D, 0x31, 0x38);
 const C_POPUP_SUCCESS: Color = Color::from_rgb8(0x1D, 0xC4, 0x72);
+const C_ONLINE: Color = Color::from_rgb8(0x22, 0xC5, 0x5E);
 
 pub fn panel_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
     let query = state.search_input.trim().to_lowercase();
@@ -523,7 +524,7 @@ fn friend_request_item(item: &FriendRequestItemVm, selected: bool) -> Element<'s
     button(
         container(
             row![
-                avatar_square(&item.title),
+                avatar_square(&item.title, false),
                 column![
                     text(title)
                         .size(15)
@@ -562,7 +563,7 @@ fn group_item(item: &GroupListItemVm, selected: bool) -> Element<'static, AppMes
     button(
         container(
             row![
-                avatar_square(&item.title),
+                avatar_square(&item.title, false),
                 column![
                     text(title)
                         .size(16)
@@ -598,7 +599,7 @@ fn friend_item(item: &FriendListItemVm, selected: bool) -> Element<'static, AppM
     button(
         container(
             row![
-                avatar_square(&item.title),
+                avatar_square(&item.title, item.is_online),
                 column![
                     text(title)
                         .size(16)
@@ -659,9 +660,9 @@ fn section_divider() -> Element<'static, AppMessage> {
         .into()
 }
 
-fn avatar_square(label: &str) -> Element<'static, AppMessage> {
+fn avatar_square(label: &str, is_online: bool) -> Element<'static, AppMessage> {
     let first = label.chars().next().unwrap_or('友');
-    container(
+    let avatar = container(
         text(first.to_string())
             .size(12)
             .color(Color::from_rgb8(0xEE, 0xF2, 0xF8)),
@@ -674,7 +675,35 @@ fn avatar_square(label: &str) -> Element<'static, AppMessage> {
         background: Some(Background::Color(Color::from_rgb8(0x5A, 0x6F, 0x86))),
         border: border::rounded(6.0),
         ..container::Style::default()
-    })
+    });
+
+    if !is_online {
+        return avatar.into();
+    }
+
+    let dot = container(text(""))
+        .width(Length::Fixed(9.0))
+        .height(Length::Fixed(9.0))
+        .style(|_| container::Style {
+            background: Some(Background::Color(C_ONLINE)),
+            border: border::rounded(99.0).width(2.0).color(C_PANEL_BG),
+            ..container::Style::default()
+        });
+
+    container(
+        iced::widget::stack![
+            avatar,
+            container(dot)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Right)
+                .align_y(alignment::Vertical::Bottom)
+        ]
+        .width(Length::Fixed(34.0))
+        .height(Length::Fixed(34.0)),
+    )
+    .width(Length::Fixed(34.0))
+    .height(Length::Fixed(34.0))
     .into()
 }
 
@@ -899,7 +928,7 @@ fn search_result_card(
     container(
         column![
             row![
-                avatar_square(&title),
+                avatar_square(&title, false),
                 column![
                     text(title).size(22).color(C_TEXT_PRIMARY),
                     text(subtitle).size(13).color(C_TEXT_SECONDARY),
@@ -946,7 +975,7 @@ fn search_result_tile(user: &SearchUserVm, selected: bool) -> Element<'static, A
 
     button(
         row![
-            avatar_square(&title),
+            avatar_square(&title, false),
             text(title).size(15).color(C_TEXT_PRIMARY),
             container(
                 text(if user.is_friend { "Added" } else { "查看" })

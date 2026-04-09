@@ -87,7 +87,10 @@ pub fn update(
                 .iter()
                 .map(|item| item.unread_count)
                 .sum();
-            let mut tasks = vec![schedule_total_unread_refresh(bridge)];
+            let mut tasks = vec![
+                schedule_total_unread_refresh(bridge),
+                schedule_presence_channel_subscriptions(state, bridge),
+            ];
             if state.session_list.refresh_pending {
                 tasks.push(schedule_session_list_refresh(state, bridge));
             }
@@ -186,9 +189,20 @@ pub fn update(
         AppMessage::AddFriendFriendsLoaded { items } => {
             state.add_friend.friends = items;
             state.add_friend.contacts_error = None;
+            apply_presence_to_friend_items(state);
             sync_add_friend_flags(state);
+            schedule_friend_presence_refresh(state, bridge)
+        }
+
+        AppMessage::FriendPresencesLoaded { items } => {
+            for presence in items {
+                state.presences.insert(presence.user_id, presence);
+            }
+            apply_presence_to_friend_items(state);
             Task::none()
         }
+
+        AppMessage::FriendPresencesLoadFailed { error: _ } => Task::none(),
 
         AppMessage::AddFriendFriendsLoadFailed { error } => {
             state.add_friend.contacts_error = Some(format_ui_error(&error));
@@ -618,6 +632,34 @@ pub fn update(
             Task::batch(tasks)
         }
 
+        AppMessage::ChatPresenceLoaded {
+            channel_id,
+            channel_type,
+            open_token,
+            presence,
+        } => {
+            if !pass_dual_guard(state, channel_id, channel_type, open_token) {
+                return Task::none();
+            }
+            if let Some(presence) = presence {
+                state.presences.insert(presence.user_id, presence);
+                apply_presence_to_friend_items(state);
+            }
+            Task::none()
+        }
+
+        AppMessage::ChatPresenceLoadFailed {
+            channel_id,
+            channel_type,
+            open_token,
+            error: _,
+        } => {
+            if !pass_dual_guard(state, channel_id, channel_type, open_token) {
+                return Task::none();
+            }
+            Task::none()
+        }
+
         AppMessage::ConversationOpenFailed {
             channel_id,
             channel_type,
@@ -634,6 +676,12 @@ pub fn update(
             channel_id,
             channel_type,
         } => handle_conversation_selected(state, bridge, channel_id, channel_type),
+
+        AppMessage::PresenceChanged { presence } => {
+            state.presences.insert(presence.user_id, presence.clone());
+            apply_presence_to_friend_items(state);
+            Task::none()
+        }
 
         AppMessage::AddFriendInputChanged { text } => {
             state.add_friend.add_input = text;
@@ -834,12 +882,16 @@ pub fn update(
                         async move { bridge.get_or_create_direct_channel(user_id).await }
                     },
                     move |result| match result {
-                        Ok((channel_id, channel_type)) => AppMessage::AddFriendOpenConversationResolved {
-                            user_id,
-                            channel_id,
-                            channel_type,
-                        },
-                        Err(error) => AppMessage::AddFriendOpenConversationFailed { user_id, error },
+                        Ok((channel_id, channel_type)) => {
+                            AppMessage::AddFriendOpenConversationResolved {
+                                user_id,
+                                channel_id,
+                                channel_type,
+                            }
+                        }
+                        Err(error) => {
+                            AppMessage::AddFriendOpenConversationFailed { user_id, error }
+                        }
                     },
                 ),
             ])
@@ -1538,10 +1590,12 @@ fn handle_conversation_selected(
 
     let open_token = state.allocate_open_token();
     let resolved_title = resolve_chat_title(state, channel_id, channel_type);
+    let peer_user_id = resolve_chat_peer_user_id(state, channel_id, channel_type);
     state.route = Route::Chat;
     state.active_chat = Some(ChatScreenState {
         channel_id,
         channel_type,
+        peer_user_id,
         title: resolved_title,
         open_token,
         timeline: TimelineState::default(),
@@ -1553,24 +1607,62 @@ fn handle_conversation_selected(
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
-    let bridge = Arc::clone(bridge);
-    Task::perform(
-        async move { bridge.open_timeline(channel_id, channel_type).await },
-        move |result| match result {
-            Ok(snapshot) => AppMessage::ConversationOpened {
-                channel_id,
-                channel_type,
-                open_token,
-                snapshot,
+    let timeline_bridge = Arc::clone(bridge);
+    let subscribe_bridge = Arc::clone(bridge);
+    let presence_bridge = Arc::clone(bridge);
+    let mut tasks = vec![
+        Task::perform(
+            async move {
+                timeline_bridge
+                    .open_timeline(channel_id, channel_type)
+                    .await
             },
-            Err(error) => AppMessage::ConversationOpenFailed {
-                channel_id,
-                channel_type,
-                open_token,
-                error,
+            move |result| match result {
+                Ok(snapshot) => AppMessage::ConversationOpened {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    snapshot,
+                },
+                Err(error) => AppMessage::ConversationOpenFailed {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    error,
+                },
             },
-        },
-    )
+        ),
+        Task::perform(
+            async move {
+                subscribe_bridge
+                    .subscribe_channel(channel_id, channel_type)
+                    .await
+            },
+            |_| AppMessage::Noop,
+        ),
+    ];
+
+    if let Some(peer_user_id) = peer_user_id {
+        tasks.push(Task::perform(
+            async move { presence_bridge.batch_get_presence(vec![peer_user_id]).await },
+            move |result| match result {
+                Ok(mut items) => AppMessage::ChatPresenceLoaded {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    presence: items.pop(),
+                },
+                Err(error) => AppMessage::ChatPresenceLoadFailed {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    error,
+                },
+            },
+        ));
+    }
+
+    Task::batch(tasks)
 }
 
 fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> String {
@@ -1607,6 +1699,87 @@ fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> S
     format!("会话 {}", channel_id)
 }
 
+fn resolve_chat_peer_user_id(state: &AppState, channel_id: u64, channel_type: i32) -> Option<u64> {
+    if let Some(item) = state
+        .session_list
+        .items
+        .iter()
+        .find(|item| item.channel_id == channel_id && item.channel_type == channel_type)
+    {
+        if item.peer_user_id.is_some() {
+            return item.peer_user_id;
+        }
+    }
+
+    match state.add_friend.selected_panel_item {
+        Some(AddFriendSelectionVm::Friend(user_id))
+        | Some(AddFriendSelectionVm::Request(user_id)) => Some(user_id),
+        _ => None,
+    }
+}
+
+fn apply_presence_to_friend_items(state: &mut AppState) {
+    for item in &mut state.add_friend.friends {
+        item.is_online = state
+            .presences
+            .get(&item.user_id)
+            .map(|presence| presence.is_online)
+            .unwrap_or(false);
+    }
+}
+
+fn schedule_friend_presence_refresh(
+    state: &AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    let user_ids = state
+        .add_friend
+        .friends
+        .iter()
+        .map(|item| item.user_id)
+        .collect::<Vec<_>>();
+    if user_ids.is_empty() {
+        return Task::none();
+    }
+
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.batch_get_presence(user_ids).await },
+        |result| match result {
+            Ok(items) => AppMessage::FriendPresencesLoaded { items },
+            Err(error) => AppMessage::FriendPresencesLoadFailed { error },
+        },
+    )
+}
+
+fn schedule_presence_channel_subscriptions(
+    state: &AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    let direct_channels = state
+        .session_list
+        .items
+        .iter()
+        .filter(|item| item.peer_user_id.is_some())
+        .map(|item| (item.channel_id, item.channel_type))
+        .collect::<Vec<_>>();
+    if direct_channels.is_empty() {
+        return Task::none();
+    }
+
+    let tasks = direct_channels
+        .into_iter()
+        .map(|(channel_id, channel_type)| {
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.subscribe_channel(channel_id, channel_type).await },
+                |_| AppMessage::Noop,
+            )
+        })
+        .collect::<Vec<_>>();
+    Task::batch(tasks)
+}
+
 fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device_id: String) {
     if !state.auth.username.trim().is_empty() {
         auth_prefs::save_last_username(&state.auth.username);
@@ -1624,6 +1797,7 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     // broadcast::Receiver. This ensures events from the new user's session
     // are actually received.
     state.session_epoch = state.session_epoch.wrapping_add(1);
+    state.presences.clear();
     state.route = Route::SessionList;
 }
 
@@ -1648,6 +1822,7 @@ fn apply_logout(state: &mut AppState) {
     state.add_friend.contacts_error = None;
     state.add_friend.search_results.clear();
     state.add_friend.feedback = None;
+    state.presences.clear();
     state.auth.is_submitting = false;
     state.auth.error = None;
     state.auth.password.clear();
@@ -3058,7 +3233,8 @@ mod tests {
         AppState, ChatScreenState, ComposerState, RuntimeMessageIndex, TimelineState,
     };
     use crate::presentation::vm::{
-        MessageSendStateVm, MessageVm, TimelineItemKey, TimelinePatchVm, UiError, UnreadMarkerVm,
+        MessageSendStateVm, MessageVm, PresenceVm, TimelineItemKey, TimelinePatchVm, UiError,
+        UnreadMarkerVm,
     };
     use crate::sdk::bridge::SdkBridge;
 
@@ -3142,6 +3318,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn batch_get_presence(
+            &self,
+            _user_ids: Vec<u64>,
+        ) -> Result<Vec<PresenceVm>, UiError> {
+            Ok(Vec::new())
+        }
+
         async fn load_group_list(
             &self,
         ) -> Result<Vec<crate::presentation::vm::GroupListItemVm>, UiError> {
@@ -3184,6 +3367,14 @@ mod tests {
             _channel_type: i32,
         ) -> Result<crate::presentation::vm::TimelineSnapshotVm, UiError> {
             Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn subscribe_channel(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+        ) -> Result<(), UiError> {
+            Ok(())
         }
 
         async fn send_text_message(
@@ -3238,6 +3429,10 @@ mod tests {
             Ok(())
         }
 
+        async fn get_file_url(&self, _file_id: u64) -> Result<String, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
         fn subscribe_timeline(&self, _session_epoch: u64) -> Subscription<SdkEvent> {
             Subscription::none()
         }
@@ -3249,6 +3444,7 @@ mod tests {
         state.active_chat = Some(ChatScreenState {
             channel_id: 100,
             channel_type: 2,
+            peer_user_id: None,
             title: "测试会话".to_string(),
             open_token: 1,
             timeline: TimelineState::default(),
@@ -3273,7 +3469,9 @@ mod tests {
             body: "hello".to_string(),
             message_type: 1,
             media_url: None,
+            media_file_id: None,
             media_local_path: None,
+            media_file_size: None,
             created_at: 0,
             pts: None,
             send_state: Some(MessageSendStateVm::Queued),
@@ -3300,7 +3498,9 @@ mod tests {
             body: body.to_string(),
             message_type: 1,
             media_url: None,
+            media_file_id: None,
             media_local_path: None,
+            media_file_size: None,
             created_at,
             pts: Some(pts),
             send_state: None,
@@ -3422,7 +3622,9 @@ mod tests {
             body: "remote".to_string(),
             message_type: 1,
             media_url: None,
+            media_file_id: None,
             media_local_path: None,
+            media_file_size: None,
             created_at: 0,
             pts: Some(99),
             send_state: None,
@@ -3467,7 +3669,9 @@ mod tests {
             body: "remote".to_string(),
             message_type: 1,
             media_url: None,
+            media_file_id: None,
             media_local_path: None,
+            media_file_size: None,
             created_at: 1,
             pts: Some(22),
             send_state: None,
@@ -3592,5 +3796,42 @@ mod tests {
         assert!(matches!(state.route, Route::SessionList));
         assert_eq!(state.auth.user_id, Some(42));
         assert_eq!(state.auth.token.as_deref(), Some("token-1"));
+    }
+
+    #[test]
+    fn presence_changed_updates_friend_presence_projection() {
+        let mut state = AppState::new();
+        let bridge: Arc<dyn SdkBridge> = Arc::new(StubBridge);
+        state
+            .add_friend
+            .friends
+            .push(crate::presentation::vm::FriendListItemVm {
+                user_id: 42,
+                title: "Alice".to_string(),
+                subtitle: "UID: 42".to_string(),
+                is_added: true,
+                is_online: false,
+            });
+
+        let _ = update(
+            &mut state,
+            AppMessage::PresenceChanged {
+                presence: PresenceVm {
+                    user_id: 42,
+                    is_online: true,
+                    last_seen_at: 0,
+                    device_count: 1,
+                },
+            },
+            &bridge,
+        );
+
+        assert_eq!(state.add_friend.friends.len(), 1);
+        assert!(state.add_friend.friends[0].is_online);
+        assert!(state
+            .presences
+            .get(&42)
+            .map(|p| p.is_online)
+            .unwrap_or(false));
     }
 }

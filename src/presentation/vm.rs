@@ -33,6 +33,7 @@ pub struct LocalAccountVm {
 pub struct SessionListItemVm {
     pub channel_id: u64,
     pub channel_type: i32,
+    pub peer_user_id: Option<u64>,
     pub title: String,
     pub subtitle: String,
     pub unread_count: u32,
@@ -57,6 +58,15 @@ pub struct FriendListItemVm {
     pub title: String,
     pub subtitle: String,
     pub is_added: bool,
+    pub is_online: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PresenceVm {
+    pub user_id: u64,
+    pub is_online: bool,
+    pub last_seen_at: i64,
+    pub device_count: u32,
 }
 
 #[derive(Debug, Clone, Default)]

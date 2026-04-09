@@ -1,11 +1,12 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use privchat_protocol::presence::PresenceChangedNotification;
 use privchat_sdk::SdkEvent;
 use tracing::{info, warn};
 
 use crate::app::message::{AppMessage, MessageIngressSource};
 use crate::app::reporting;
-use crate::presentation::vm::{ClientTxnId, OpenToken, TimelineRevision};
+use crate::presentation::vm::{ClientTxnId, OpenToken, PresenceVm, TimelineRevision};
 
 #[derive(Debug, Clone, Default, Hash)]
 pub struct EventMapContext {
@@ -29,6 +30,16 @@ static PATCH_REVISION_SEQ: AtomicU64 = AtomicU64::new(1);
 
 pub fn allocate_patch_revision() -> TimelineRevision {
     PATCH_REVISION_SEQ.fetch_add(1, Ordering::Relaxed)
+}
+
+fn decode_presence_changed(payload: &[u8]) -> Option<PresenceVm> {
+    let notification: PresenceChangedNotification = serde_json::from_slice(payload).ok()?;
+    Some(PresenceVm {
+        user_id: notification.snapshot.user_id,
+        is_online: notification.snapshot.is_online,
+        last_seen_at: notification.snapshot.last_seen_at,
+        device_count: notification.snapshot.device_count,
+    })
 }
 
 fn is_channel_entity(entity_type: &str) -> bool {
@@ -314,17 +325,26 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
         }
         SdkEvent::SubscriptionMessageReceived {
             channel_id,
+            topic,
+            payload,
             server_message_id,
             ..
-        } => match server_message_id {
-            Some(message_id) => AppMessage::GlobalMessageIngress {
-                message_id,
-                channel_id: Some(channel_id),
-                channel_type: None,
-                source: MessageIngressSource::SubscriptionMessageReceived,
-            },
-            None => AppMessage::Noop,
-        },
+        } => {
+            if matches!(topic.as_deref(), Some("presence_changed")) {
+                return decode_presence_changed(&payload)
+                    .map(|presence| AppMessage::PresenceChanged { presence })
+                    .unwrap_or(AppMessage::Noop);
+            }
+            match server_message_id {
+                Some(message_id) => AppMessage::GlobalMessageIngress {
+                    message_id,
+                    channel_id: Some(channel_id),
+                    channel_type: None,
+                    source: MessageIngressSource::SubscriptionMessageReceived,
+                },
+                None => AppMessage::Noop,
+            }
+        }
         _ => AppMessage::Noop,
     }
 }
@@ -444,6 +464,41 @@ mod tests {
                 channel_type: None,
                 source: MessageIngressSource::MessageSendStatusChanged,
             })
+        ));
+    }
+
+    #[test]
+    fn presence_changed_maps_to_presence_updated() {
+        let context = base_context();
+        let payload = serde_json::to_vec(&PresenceChangedNotification {
+            user_id: 42,
+            version: 7,
+            snapshot: privchat_protocol::presence::PresenceSnapshot {
+                user_id: 42,
+                is_online: true,
+                last_seen_at: 1_710_000_000_000,
+                device_count: 1,
+                version: 7,
+            },
+        })
+        .expect("encode payload");
+
+        let mapped = map_sdk_event_to_app_message(
+            SdkEvent::SubscriptionMessageReceived {
+                channel_id: 100,
+                topic: Some("presence_changed".to_string()),
+                payload,
+                publisher: None,
+                server_message_id: None,
+                timestamp: 1_710_000_000,
+            },
+            &context,
+        );
+
+        assert!(matches!(
+            mapped,
+            Some(AppMessage::PresenceChanged { presence })
+                if presence.user_id == 42 && presence.is_online && presence.device_count == 1
         ));
     }
 }

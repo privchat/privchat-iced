@@ -7,8 +7,8 @@ use crate::app::auth_prefs;
 use crate::app::route::Route;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
-    GroupListItemVm, LocalAccountVm, MessageVm, OpenToken, SearchUserVm, SessionListItemVm,
-    TimelineRevision, UnreadMarkerVm,
+    GroupListItemVm, LocalAccountVm, MessageVm, OpenToken, PresenceVm, SearchUserVm,
+    SessionListItemVm, TimelineRevision, UnreadMarkerVm,
 };
 
 fn default_device_id() -> String {
@@ -236,6 +236,7 @@ impl RuntimeMessageIndex {
 pub struct ChatScreenState {
     pub channel_id: u64,
     pub channel_type: i32,
+    pub peer_user_id: Option<u64>,
     pub title: String,
     pub open_token: OpenToken,
     pub timeline: TimelineState,
@@ -263,6 +264,7 @@ pub struct AppState {
     pub auth: AuthState,
     pub layout: WorkspaceLayoutState,
     pub session_list: SessionListState,
+    pub presences: HashMap<u64, PresenceVm>,
     pub add_friend: AddFriendState,
     pub settings: SettingsState,
     pub overlay: OverlayState,
@@ -303,6 +305,7 @@ impl AppState {
             auth: AuthState::default(),
             layout: WorkspaceLayoutState::default(),
             session_list: SessionListState::default(),
+            presences: HashMap::new(),
             add_friend: AddFriendState::default(),
             settings: SettingsState,
             overlay: OverlayState::default(),
