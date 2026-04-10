@@ -25,5 +25,3 @@ privchat-protocol = { path = "../privchat-protocol" }
 [package.metadata.bundle]
 name = "PrivChat"
 identifier = "com.netonstream.privchat-desktop"
-icon = ["assets/icon.icns"]
-resources = ["config/*.toml"]

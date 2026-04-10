@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use std::{env, fs, path::PathBuf};
+use std::env;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
@@ -28,42 +28,39 @@ pub struct ServerConfig {
     pub priority: u32,
 }
 
-fn resolve_config_dir() -> PathBuf {
-    // 编译时引入源码目录的 config/ 路径
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let manifest_config = PathBuf::from(manifest_dir).join("config");
-    if manifest_config.exists() {
-        return manifest_config;
-    }
+// 在编译时嵌入所有配置文件
+const CONFIG_LOCAL: &str = include_str!("../config/local.toml");
+const CONFIG_LOAN: &str = include_str!("../config/loan.toml");
+const CONFIG_PROD: &str = include_str!("../config/prod.toml");
+const CONFIG_LIVE: &str = include_str!("../config/live.toml");
+const CONFIG_DUBAI: &str = include_str!("../config/dubai.toml");
 
-    // 打包后从 exe 旁边找
-    if let Ok(exe_path) = env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let parent_name = parent.file_name().map(|n| n.to_string_lossy());
-            if parent_name.as_deref() == Some("MacOS") {
-                if let Some(bundle_parent) = parent.parent() {
-                    let resources = bundle_parent.join("Resources");
-                    if resources.join("config").exists() {
-                        return resources.join("config");
-                    }
-                }
-            }
-            return parent.join("config");
-        }
+fn get_embedded_config(profile: &str) -> Option<&'static str> {
+    match profile {
+        "local" => Some(CONFIG_LOCAL),
+        "loan" => Some(CONFIG_LOAN),
+        "prod" => Some(CONFIG_PROD),
+        "live" => Some(CONFIG_LIVE),
+        "dubai" => Some(CONFIG_DUBAI),
+        _ => None,
     }
-    manifest_config
 }
 
 pub fn load_app_config() -> anyhow::Result<(String, AppConfig)> {
     let profile = env::var("PRIVCHAT_PROFILE")
         .ok()
         .or_else(|| option_env!("PRIVCHAT_PROFILE").map(String::from))
-        .unwrap_or_else(|| "local".to_string());
-    let config_dir = resolve_config_dir();
-    let path = config_dir.join(format!("{profile}.toml"));
-    tracing::info!("loading config from: {}", path.display());
-    let raw = fs::read_to_string(&path)?;
-    let config: AppConfig = toml::from_str(&raw)?;
+        .unwrap_or_else(|| "loan".to_string())
+        .trim()
+        .to_string();
+
+    // 从编译时嵌入的配置中获取
+    let config_content = get_embedded_config(&profile)
+        .ok_or_else(|| anyhow::anyhow!("Unknown profile: '{}', supported profiles: local, loan, prod, live, dubai", profile))?;
+
+    tracing::info!("loading embedded config for profile: {}", profile);
+
+    let config: AppConfig = toml::from_str(config_content)?;
     validate_config(&profile, &config)?;
     Ok((profile, config))
 }
