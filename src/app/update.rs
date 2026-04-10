@@ -2128,7 +2128,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
     )
 }
 
-fn attachment_type_and_preview(path: &Path) -> (i32, String) {
+fn attachment_type_body_and_preview(path: &Path) -> (i32, String, String) {
     let ext = path
         .extension()
         .and_then(|value| value.to_str())
@@ -2140,9 +2140,21 @@ fn attachment_type_and_preview(path: &Path) -> (i32, String) {
         .unwrap_or("file")
         .to_string();
     match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" => (IMAGE_MESSAGE_TYPE, filename),
-        "mp4" | "mov" | "mkv" | "avi" | "webm" => (VIDEO_MESSAGE_TYPE, filename),
-        _ => (FILE_MESSAGE_TYPE, filename),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" => (
+            IMAGE_MESSAGE_TYPE,
+            "[图片]".to_string(),
+            "[图片]".to_string(),
+        ),
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => (
+            VIDEO_MESSAGE_TYPE,
+            filename,
+            "[视频]".to_string(),
+        ),
+        _ => (
+            FILE_MESSAGE_TYPE,
+            filename,
+            "[文件]".to_string(),
+        ),
     }
 }
 
@@ -2176,7 +2188,7 @@ fn handle_send_attachment_path(
     };
 
     let path = Path::new(&file_path);
-    let (message_type, preview) = attachment_type_and_preview(path);
+    let (message_type, body, preview) = attachment_type_body_and_preview(path);
     let local_file_size = fs::metadata(path).ok().map(|m| m.len());
     let from_uid = state.auth.user_id.unwrap_or(0);
     let now = now_timestamp_millis();
@@ -2190,7 +2202,7 @@ fn handle_send_attachment_path(
             server_message_id: None,
             client_txn_id: Some(client_txn_id),
             from_uid,
-            body: preview.clone(),
+            body,
             message_type,
             media_url: None,
             media_file_id: None,
