@@ -36,6 +36,11 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
                 } else {
                     Some(text_editor::Binding::Custom(AppMessage::SendPressed))
                 }
+            } else if matches!(key_press.key.as_ref(), Key::Character("v"))
+                && (key_press.modifiers.command() || key_press.modifiers.control())
+                && !key_press.modifiers.alt()
+            {
+                Some(text_editor::Binding::Custom(AppMessage::ComposerPastePressed))
             } else {
                 text_editor::Binding::from_key_press(key_press)
             }

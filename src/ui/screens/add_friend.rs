@@ -142,6 +142,13 @@ pub fn detail_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
                         .size(14)
                         .wrapping(iced::widget::text::Wrapping::Word)
                         .color(C_TEXT_PRIMARY),
+                    button(text("复制").size(12).color(Color::from_rgb8(0xD8, 0xDF, 0xE8)))
+                        .padding([4, 10])
+                        .style(copy_field_button_style)
+                        .on_press(AppMessage::CopyDetailFieldPressed {
+                            label: item.label.clone(),
+                            value: item.value.clone(),
+                        }),
                 ]
                 .spacing(12),
             );
@@ -167,6 +174,14 @@ pub fn detail_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
             .push(fields)
             .width(Length::Fill)
             .height(Length::Shrink);
+        if let Some(feedback) = state.feedback.as_ref().filter(|v| !v.trim().is_empty()) {
+            content = content.push(
+                text(feedback)
+                    .size(13)
+                    .wrapping(iced::widget::text::Wrapping::Word)
+                    .color(Color::from_rgb8(0xD6, 0xB0, 0x77)),
+            );
+        }
 
         if let Some(action) = detail_primary_action(state) {
             content = content.push(section_divider()).push(
@@ -301,7 +316,7 @@ fn matches_query(query: &str, title: &str, subtitle: &str) -> bool {
 }
 
 fn search_bar(search_value: &str) -> Element<'_, AppMessage> {
-    let search_input = text_input("Search", search_value)
+    let search_input = text_input("搜索", search_value)
         .on_input(|text| AppMessage::AddFriendSearchChanged { text })
         .padding([8, 10])
         .size(14)
@@ -345,7 +360,7 @@ fn search_bar(search_value: &str) -> Element<'_, AppMessage> {
 pub fn search_window_view(state: &AddFriendState) -> Element<'_, AppMessage> {
     let header = row![
         container(text("")).width(Length::Fill),
-        text("Add Contacts")
+        text("添加联系人")
             .size(22)
             .color(Color::from_rgb8(0xEA, 0xEE, 0xF4)),
         container(
@@ -389,11 +404,7 @@ pub fn search_window_view(state: &AddFriendState) -> Element<'_, AppMessage> {
             ..container::Style::default()
         })
         .width(Length::Fill),
-        button(
-            text("Search")
-                .size(17)
-                .color(Color::from_rgb8(0xFF, 0xFF, 0xFF))
-        )
+        button(text("搜索").size(17).color(Color::from_rgb8(0xFF, 0xFF, 0xFF)))
         .padding([10, 18])
         .style(popup_search_button_style)
         .on_press(AppMessage::AddFriendSearchPressed),
@@ -406,7 +417,7 @@ pub fn search_window_view(state: &AddFriendState) -> Element<'_, AppMessage> {
     if state.search_loading {
         body = body.push(
             container(
-                text("Searching...")
+                text("搜索中...")
                     .size(15)
                     .color(Color::from_rgb8(0x9F, 0xA6, 0xAF)),
             )
@@ -500,10 +511,12 @@ fn friend_request_item(item: &FriendRequestItemVm, selected: bool) -> Element<'s
     let selection = AddFriendSelectionVm::Request(item.from_user_id);
 
     let action: Element<'static, AppMessage> = if item.is_added {
-        text("Added")
-            .size(14)
-            .color(Color::from_rgb8(0xA3, 0xAA, 0xB3))
-            .into()
+        container(
+            text("已添加")
+                .size(15)
+                .color(Color::from_rgb8(0xA8, 0xAF, 0xB8)),
+        )
+        .into()
     } else {
         container(
             text("查看")
@@ -887,82 +900,6 @@ fn display_units(ch: char) -> usize {
     }
 }
 
-fn search_result_card(
-    user: &SearchUserVm,
-    selected: bool,
-    feedback: Option<&str>,
-) -> Element<'static, AppMessage> {
-    let title = truncate_single_line(
-        if user.nickname.trim().is_empty() {
-            &user.username
-        } else {
-            &user.nickname
-        },
-        28,
-    );
-    let subtitle = format!("PrivChat ID: {}", user.username);
-    let tip = feedback
-        .unwrap_or("点击 Add to Contacts 发送好友申请")
-        .to_string();
-
-    let action: Element<'static, AppMessage> = if user.is_friend {
-        container(
-            text("Added")
-                .size(15)
-                .color(Color::from_rgb8(0xA8, 0xAF, 0xB8)),
-        )
-        .padding([8, 12])
-        .into()
-    } else {
-        button(
-            text("Add to Contacts")
-                .size(16)
-                .color(Color::from_rgb8(0xE9, 0xEE, 0xF5)),
-        )
-        .padding([10, 16])
-        .style(add_to_contacts_button_style)
-        .on_press(AppMessage::AddFriendRequestPressed)
-        .into()
-    };
-
-    container(
-        column![
-            row![
-                avatar_square(&title, false),
-                column![
-                    text(title).size(22).color(C_TEXT_PRIMARY),
-                    text(subtitle).size(13).color(C_TEXT_SECONDARY),
-                    text(format!("Search Session: {}", user.search_session_id))
-                        .size(13)
-                        .color(C_TEXT_SECONDARY)
-                ]
-                .spacing(5)
-                .width(Length::Fill),
-            ]
-            .spacing(14)
-            .align_y(alignment::Vertical::Center),
-            section_divider(),
-            text(tip).size(14).color(Color::from_rgb8(0xC8, 0xCF, 0xD8)),
-            container(action)
-                .width(Length::Fill)
-                .align_x(alignment::Horizontal::Center),
-        ]
-        .spacing(16),
-    )
-    .padding([18, 16])
-    .width(Length::Fill)
-    .style(move |_| container::Style {
-        background: Some(Background::Color(C_POPUP_CARD_BG)),
-        border: border::rounded(14.0).width(1.0).color(if selected {
-            Color::from_rgb8(0x4B, 0x89, 0xD0)
-        } else {
-            Color::from_rgb8(0x3C, 0x42, 0x4A)
-        }),
-        ..container::Style::default()
-    })
-    .into()
-}
-
 fn search_result_tile(user: &SearchUserVm, selected: bool) -> Element<'static, AppMessage> {
     let title = truncate_single_line(
         if user.nickname.trim().is_empty() {
@@ -978,7 +915,7 @@ fn search_result_tile(user: &SearchUserVm, selected: bool) -> Element<'static, A
             avatar_square(&title, false),
             text(title).size(15).color(C_TEXT_PRIMARY),
             container(
-                text(if user.is_friend { "Added" } else { "查看" })
+                text(if user.is_friend { "已添加" } else { "查看" })
                     .size(13)
                     .color(if user.is_friend {
                         Color::from_rgb8(0x9E, 0xA5, 0xAE)
@@ -1020,6 +957,82 @@ fn search_result_tile(user: &SearchUserVm, selected: bool) -> Element<'static, A
     .into()
 }
 
+fn search_result_card(
+    user: &SearchUserVm,
+    selected: bool,
+    feedback: Option<&str>,
+) -> Element<'static, AppMessage> {
+    let title = truncate_single_line(
+        if user.nickname.trim().is_empty() {
+            &user.username
+        } else {
+            &user.nickname
+        },
+        28,
+    );
+    let subtitle = format!("PrivChat ID: {}", user.username);
+    let tip = feedback
+        .unwrap_or("点击添加好友发送申请")
+        .to_string();
+
+    let action: Element<'static, AppMessage> = if user.is_friend {
+        container(
+            text("已添加")
+                .size(15)
+                .color(Color::from_rgb8(0xA8, 0xAF, 0xB8)),
+        )
+        .padding([8, 12])
+        .into()
+    } else {
+        button(
+            text("添加好友")
+                .size(16)
+                .color(Color::from_rgb8(0xE9, 0xEE, 0xF5)),
+        )
+        .padding([10, 16])
+        .style(add_to_contacts_button_style)
+        .on_press(AppMessage::AddFriendRequestPressed)
+        .into()
+    };
+
+    container(
+        column![
+            row![
+                avatar_square(&title, false),
+                column![
+                    text(title).size(22).color(C_TEXT_PRIMARY),
+                    text(subtitle).size(13).color(C_TEXT_SECONDARY),
+                    text(format!("搜索会话: {}", user.search_session_id))
+                        .size(13)
+                        .color(C_TEXT_SECONDARY)
+                ]
+                .spacing(5)
+                .width(Length::Fill),
+            ]
+            .spacing(14)
+            .align_y(alignment::Vertical::Center),
+            section_divider(),
+            text(tip).size(14).color(Color::from_rgb8(0xC8, 0xCF, 0xD8)),
+            container(action)
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center),
+        ]
+        .spacing(16),
+    )
+    .padding([18, 16])
+    .width(Length::Fill)
+    .style(move |_| container::Style {
+        background: Some(Background::Color(C_POPUP_CARD_BG)),
+        border: border::rounded(14.0).width(1.0).color(if selected {
+            Color::from_rgb8(0x4B, 0x89, 0xD0)
+        } else {
+            Color::from_rgb8(0x3C, 0x42, 0x4A)
+        }),
+        ..container::Style::default()
+    })
+    .into()
+}
+
 fn add_to_contacts_button_style(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
         button::Status::Hovered => Color::from_rgb8(0x4A, 0x4E, 0x56),
@@ -1031,6 +1044,24 @@ fn add_to_contacts_button_style(_theme: &Theme, status: button::Status) -> butto
         background: Some(Background::Color(bg)),
         text_color: Color::from_rgb8(0xE8, 0xED, 0xF3),
         border: border::rounded(9.0),
+        shadow: Default::default(),
+        snap: true,
+    }
+}
+
+fn copy_field_button_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => Color::from_rgb8(0x3E, 0x44, 0x4C),
+        button::Status::Pressed => Color::from_rgb8(0x34, 0x39, 0x41),
+        _ => Color::from_rgb8(0x30, 0x35, 0x3D),
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::from_rgb8(0xE8, 0xED, 0xF3),
+        border: border::rounded(7.0)
+            .width(1.0)
+            .color(Color::from_rgb8(0x4A, 0x51, 0x5A)),
         shadow: Default::default(),
         snap: true,
     }

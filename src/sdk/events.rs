@@ -1,6 +1,6 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use privchat_protocol::presence::PresenceChangedNotification;
+use privchat_protocol::presence::{PresenceChangedNotification, TypingStatusNotification};
 use privchat_sdk::SdkEvent;
 use tracing::{info, warn};
 
@@ -39,6 +39,16 @@ fn decode_presence_changed(payload: &[u8]) -> Option<PresenceVm> {
         is_online: notification.snapshot.is_online,
         last_seen_at: notification.snapshot.last_seen_at,
         device_count: notification.snapshot.device_count,
+    })
+}
+
+fn decode_typing_changed(payload: &[u8]) -> Option<AppMessage> {
+    let notification: TypingStatusNotification = serde_json::from_slice(payload).ok()?;
+    Some(AppMessage::TypingStatusChanged {
+        channel_id: notification.channel_id,
+        channel_type: i32::from(notification.channel_type),
+        user_id: notification.user_id,
+        is_typing: notification.is_typing,
     })
 }
 
@@ -334,6 +344,9 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
                 return decode_presence_changed(&payload)
                     .map(|presence| AppMessage::PresenceChanged { presence })
                     .unwrap_or(AppMessage::Noop);
+            }
+            if matches!(topic.as_deref(), Some("typing")) {
+                return decode_typing_changed(&payload).unwrap_or(AppMessage::Noop);
             }
             match server_message_id {
                 Some(message_id) => AppMessage::GlobalMessageIngress {

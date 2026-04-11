@@ -430,6 +430,22 @@ fn extract_pts(extra: &str) -> Option<u64> {
     parsed.get("pts").and_then(|v| v.as_u64())
 }
 
+fn extract_revoked(content: &str, extra: &str) -> bool {
+    let content_json = serde_json::from_str::<serde_json::Value>(content).ok();
+    let extra_json = serde_json::from_str::<serde_json::Value>(extra).ok();
+    content_json
+        .as_ref()
+        .and_then(|v| v.get("revoked"))
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            extra_json
+                .as_ref()
+                .and_then(|v| v.get("revoked"))
+                .and_then(|v| v.as_bool())
+        })
+        .unwrap_or(false)
+}
+
 fn channel_display_title(channel: &StoredChannel) -> String {
     if !channel.channel_remark.trim().is_empty() {
         return channel.channel_remark.trim().to_string();
@@ -441,14 +457,19 @@ fn channel_display_title(channel: &StoredChannel) -> String {
 }
 
 pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm {
+    let revoked = extract_revoked(&channel.last_msg_content, "");
     let raw_subtitle = extract_body(&channel.last_msg_content);
     let message_type_hint = extract_message_type_hint(&channel.last_msg_content)
         .or_else(|| infer_type_from_filename_like(&raw_subtitle));
-    let subtitle = match message_type_hint {
-        Some(IMAGE_MESSAGE_TYPE) => "[图片]".to_string(),
-        Some(VIDEO_MESSAGE_TYPE) => "[视频]".to_string(),
-        Some(FILE_MESSAGE_TYPE) => "[文件]".to_string(),
-        _ => raw_subtitle,
+    let subtitle = if revoked {
+        "[消息已撤回]".to_string()
+    } else {
+        match message_type_hint {
+            Some(IMAGE_MESSAGE_TYPE) => "[图片]".to_string(),
+            Some(VIDEO_MESSAGE_TYPE) => "[视频]".to_string(),
+            Some(FILE_MESSAGE_TYPE) => "[文件]".to_string(),
+            _ => raw_subtitle,
+        }
     };
 
     SessionListItemVm {
@@ -533,7 +554,7 @@ pub fn map_stored_message_to_vm(
         pts: extract_pts(&message.extra),
         send_state,
         is_own,
-        is_deleted: false,
+        is_deleted: extract_revoked(&message.content, &message.extra),
     }
 }
 

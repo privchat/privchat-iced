@@ -16,42 +16,42 @@ pub fn view(auth: &AuthState, add_account_mode: bool) -> Element<'_, AppMessage>
         .align_y(iced::alignment::Vertical::Center)
         .into()
     } else {
-        text("PrivChat Login").size(28).into()
+        text("PrivChat 登录").size(28).into()
     };
 
     let mut content = column![
         title,
         text_input(
             if add_account_mode {
-                "PrivChat ID / Username"
+                "PrivChat ID / 用户名"
             } else {
-                "Username"
+                "用户名"
             },
             &auth.username
         )
         .on_input(|text| AppMessage::LoginUsernameChanged { text }),
-        text_input("Password", &auth.password)
+        text_input("密码", &auth.password)
             .secure(true)
             .on_submit(AppMessage::LoginPressed)
             .on_input(|text| AppMessage::LoginPasswordChanged { text }),
-        text_input("Device ID", &auth.device_id)
+        text_input("设备 ID", &auth.device_id)
             .on_submit(AppMessage::LoginPressed)
             .on_input(|text| AppMessage::LoginDeviceIdChanged { text }),
     ]
     .spacing(10);
 
     let login_button = if auth.is_submitting {
-        button("Logging in...")
+        button("登录中...")
     } else {
-        button("Login").on_press(AppMessage::LoginPressed)
+        button("登录").on_press(AppMessage::LoginPressed)
     };
     if add_account_mode {
         content = content.push(row![login_button].spacing(8));
     } else {
         let register_button = if auth.is_submitting {
-            button("Registering...")
+            button("注册中...")
         } else {
-            button("Register").on_press(AppMessage::RegisterPressed)
+            button("注册").on_press(AppMessage::RegisterPressed)
         };
         content = content.push(row![login_button, register_button].spacing(8));
     }
@@ -60,7 +60,7 @@ pub fn view(auth: &AuthState, add_account_mode: bool) -> Element<'_, AppMessage>
         content = content.push(text(error));
     }
     if auth.user_id.is_some() && !auth.username.trim().is_empty() {
-        content = content.push(text(format!("Logged in as {}", auth.username.trim())).size(12));
+        content = content.push(text(format!("当前登录账号：{}", auth.username.trim())).size(12));
     }
 
     container(content.padding(16).max_width(520))

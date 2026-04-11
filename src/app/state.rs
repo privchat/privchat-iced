@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use iced::widget::text_editor;
 use iced::window;
@@ -73,8 +73,20 @@ impl Default for SessionListState {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct SettingsState;
+#[derive(Debug)]
+pub struct SettingsState {
+    pub notification_sound_enabled: bool,
+    pub logs_feedback: Option<String>,
+}
+
+impl Default for SettingsState {
+    fn default() -> Self {
+        Self {
+            notification_sound_enabled: true,
+            logs_feedback: None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct AddFriendState {
@@ -156,6 +168,7 @@ pub struct ComposerState {
     pub sending_disabled: bool,
     pub editor: text_editor::Content,
     pub emoji_picker_open: bool,
+    pub typing_active: bool,
 }
 
 impl std::fmt::Debug for ComposerState {
@@ -164,6 +177,7 @@ impl std::fmt::Debug for ComposerState {
             .field("draft", &self.draft)
             .field("sending_disabled", &self.sending_disabled)
             .field("emoji_picker_open", &self.emoji_picker_open)
+            .field("typing_active", &self.typing_active)
             .finish()
     }
 }
@@ -175,6 +189,7 @@ impl Default for ComposerState {
             sending_disabled: false,
             editor: text_editor::Content::new(),
             emoji_picker_open: false,
+            typing_active: false,
         }
     }
 }
@@ -243,6 +258,7 @@ pub struct ChatScreenState {
     pub runtime_index: RuntimeMessageIndex,
     pub composer: ComposerState,
     pub unread_marker: UnreadMarkerVm,
+    pub typing_hint: Option<String>,
     pub preview_image_path: Option<String>,
     pub attachment_menu: Option<AttachmentMenuState>,
 }
@@ -260,6 +276,7 @@ pub struct AppState {
     pub route: Route,
     pub main_window_id: Option<window::Id>,
     pub add_friend_search_window_id: Option<window::Id>,
+    pub logs_window_id: Option<window::Id>,
     pub active_chat: Option<ChatScreenState>,
     pub auth: AuthState,
     pub layout: WorkspaceLayoutState,
@@ -269,6 +286,7 @@ pub struct AppState {
     pub settings: SettingsState,
     pub overlay: OverlayState,
     pub switch_account: SwitchAccountState,
+    pub runtime_logs: VecDeque<String>,
     /// Monotonic counter bumped on every account switch / login / restore.
     /// Included in the SDK event subscription hash so Iced recreates the stream.
     pub session_epoch: u64,
@@ -301,15 +319,17 @@ impl AppState {
             route: Route::default(),
             main_window_id: None,
             add_friend_search_window_id: None,
+            logs_window_id: None,
             active_chat: None,
             auth: AuthState::default(),
             layout: WorkspaceLayoutState::default(),
             session_list: SessionListState::default(),
             presences: HashMap::new(),
             add_friend: AddFriendState::default(),
-            settings: SettingsState,
+            settings: SettingsState::default(),
             overlay: OverlayState::default(),
             switch_account: SwitchAccountState::default(),
+            runtime_logs: VecDeque::new(),
             session_epoch: 0,
             media_downloads_inflight: HashSet::new(),
             next_open_token: 1,

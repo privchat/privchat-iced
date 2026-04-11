@@ -41,10 +41,10 @@ pub fn view(state: &SwitchAccountState) -> Element<'_, AppMessage> {
 
             let label = row![
                 column![
-                    text(format!("账号 {}", account.uid))
+                    text(masked_account_title(&account.uid))
                         .size(16)
                         .color(Color::from_rgb8(0xE7, 0xEC, 0xF5)),
-                    text(format!("UID {}", account.uid))
+                    text("本地登录账号")
                         .size(13)
                         .color(Color::from_rgb8(0x93, 0x9A, 0xA4)),
                 ]
@@ -133,6 +133,18 @@ pub fn view(state: &SwitchAccountState) -> Element<'_, AppMessage> {
         ..container::Style::default()
     })
     .into()
+}
+
+fn masked_account_title(uid: &str) -> String {
+    let trimmed = uid.trim();
+    if trimmed.is_empty() {
+        return "账号".to_string();
+    }
+    if trimmed.len() <= 4 {
+        return format!("账号 {}", trimmed);
+    }
+    let suffix = &trimmed[trimmed.len() - 4..];
+    format!("账号 ****{}", suffix)
 }
 
 fn account_item_style(_theme: &Theme, status: button::Status) -> button::Style {

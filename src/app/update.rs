@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -35,6 +36,7 @@ const TEXT_MESSAGE_TYPE: i32 = ContentMessageType::Text as i32;
 const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
 const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
+const MAX_RUNTIME_LOGS: usize = 1200;
 
 /// Sole mutation entry point.
 pub fn update(
@@ -42,6 +44,12 @@ pub fn update(
     message: AppMessage,
     bridge: &Arc<dyn SdkBridge>,
 ) -> Task<AppMessage> {
+    append_runtime_log(
+        state,
+        "EVENT",
+        &truncate_log_line(&format!("{message:?}"), 240),
+    );
+
     match message {
         AppMessage::Noop => Task::none(),
 
@@ -378,6 +386,9 @@ pub fn update(
             if state.add_friend_search_window_id == Some(window_id) {
                 state.add_friend_search_window_id = None;
             }
+            if state.logs_window_id == Some(window_id) {
+                state.logs_window_id = None;
+            }
             window::close(window_id)
         }
 
@@ -395,6 +406,16 @@ pub fn update(
             state.overlay.settings_menu_open = false;
             state.route = Route::Settings;
             Task::none()
+        }
+
+        AppMessage::SettingsMenuOpenLogs => {
+            state.overlay.settings_menu_open = false;
+            if let Some(window_id) = state.logs_window_id {
+                return window::gain_focus(window_id);
+            }
+            let (window_id, task) = window::open(logs_window_settings());
+            state.logs_window_id = Some(window_id);
+            task.map(|window_id| AppMessage::LogsWindowOpened { window_id })
         }
 
         AppMessage::SettingsMenuSwitchAccount => {
@@ -419,6 +440,78 @@ pub fn update(
                 },
                 |_| AppMessage::Noop,
             )
+        }
+
+        AppMessage::LogsWindowOpened { window_id } => {
+            state.logs_window_id = Some(window_id);
+            Task::none()
+        }
+
+        AppMessage::CloseLogsWindow => {
+            if let Some(window_id) = state.logs_window_id.take() {
+                return window::close(window_id);
+            }
+            Task::none()
+        }
+
+        AppMessage::CopyLogsPressed => {
+            let content = state.runtime_logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            match copy_text_to_clipboard(&content) {
+                Ok(()) => {
+                    state.settings.logs_feedback = Some("日志已复制到剪贴板".to_string());
+                }
+                Err(error) => {
+                    let text = format!("复制日志失败: {}", format_ui_error(&error));
+                    state.settings.logs_feedback = Some(text.clone());
+                    append_runtime_log(state, "WARN", &text);
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ClearLogsPressed => {
+            state.runtime_logs.clear();
+            state.settings.logs_feedback = Some("日志已清空".to_string());
+            Task::none()
+        }
+
+        AppMessage::ExportLogsPressed => Task::perform(
+            async move {
+                rfd::FileDialog::new()
+                    .set_file_name("privchat-iced.log")
+                    .save_file()
+                    .map(|path| path.to_string_lossy().to_string())
+            },
+            |save_path| AppMessage::LogsExportSelected { save_path },
+        ),
+
+        AppMessage::LogsExportSelected { save_path } => {
+            let Some(path) = save_path else {
+                state.settings.logs_feedback = Some("已取消导出".to_string());
+                return Task::none();
+            };
+            let content = state.runtime_logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            match fs::write(&path, content) {
+                Ok(()) => {
+                    state.settings.logs_feedback = Some(format!("日志已导出: {path}"));
+                }
+                Err(error) => {
+                    let text = format!("导出日志失败: {error}");
+                    state.settings.logs_feedback = Some(text.clone());
+                    append_runtime_log(state, "WARN", &text);
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ToggleNotificationSound => {
+            state.settings.notification_sound_enabled = !state.settings.notification_sound_enabled;
+            state.settings.logs_feedback = Some(if state.settings.notification_sound_enabled {
+                "已开启新消息提示音".to_string()
+            } else {
+                "已关闭新消息提示音".to_string()
+            });
+            Task::none()
         }
 
         AppMessage::CloseSwitchAccountPanel => {
@@ -680,6 +773,42 @@ pub fn update(
         AppMessage::PresenceChanged { presence } => {
             state.presences.insert(presence.user_id, presence.clone());
             apply_presence_to_friend_items(state);
+            Task::none()
+        }
+
+        AppMessage::TypingStatusChanged {
+            channel_id,
+            channel_type,
+            user_id,
+            is_typing,
+        } => {
+            let my_user_id = state.auth.user_id.unwrap_or_default();
+            if user_id == my_user_id {
+                return Task::none();
+            }
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id && chat.channel_type == channel_type {
+                    chat.typing_hint = if is_typing {
+                        Some("对方正在输入…".to_string())
+                    } else {
+                        None
+                    };
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::TypingSendCompleted { is_typing } => {
+            tracing::debug!("typing send completed: is_typing={is_typing}");
+            Task::none()
+        }
+
+        AppMessage::TypingSendFailed { is_typing, error } => {
+            warn!(
+                "typing send failed: is_typing={} error={}",
+                is_typing,
+                format_ui_error(&error)
+            );
             Task::none()
         }
 
@@ -975,11 +1104,37 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::CopyDetailFieldPressed { label, value } => {
+            match copy_text_to_clipboard(&value) {
+                Ok(()) => {
+                    state.add_friend.feedback = Some(format!("已复制{label}"));
+                }
+                Err(error) => {
+                    state.add_friend.feedback =
+                        Some(format!("复制失败: {}", format_ui_error(&error)));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ComposerPastePressed => handle_composer_paste_pressed(state, bridge),
+
         AppMessage::ComposerInputChanged { text } => {
             if let Some(chat) = &mut state.active_chat {
+                let was_typing = chat.composer.typing_active;
                 chat.composer.draft = text;
                 chat.composer.editor =
                     iced::widget::text_editor::Content::with_text(&chat.composer.draft);
+                let is_typing = !chat.composer.draft.trim().is_empty();
+                chat.composer.typing_active = is_typing;
+                if was_typing != is_typing {
+                    return schedule_send_typing_task(
+                        bridge,
+                        chat.channel_id,
+                        chat.channel_type,
+                        is_typing,
+                    );
+                }
             }
             Task::none()
         }
@@ -1000,10 +1155,21 @@ pub fn update(
 
         AppMessage::EmojiPicked { emoji } => {
             if let Some(chat) = &mut state.active_chat {
+                let was_typing = chat.composer.typing_active;
                 chat.composer.draft.push_str(&emoji);
                 chat.composer.editor =
                     iced::widget::text_editor::Content::with_text(&chat.composer.draft);
                 chat.composer.emoji_picker_open = false;
+                let is_typing = !chat.composer.draft.trim().is_empty();
+                chat.composer.typing_active = is_typing;
+                if was_typing != is_typing {
+                    return schedule_send_typing_task(
+                        bridge,
+                        chat.channel_id,
+                        chat.channel_type,
+                        is_typing,
+                    );
+                }
             }
             Task::none()
         }
@@ -1376,8 +1542,19 @@ pub fn update(
 
         AppMessage::ComposerEdited { action } => {
             if let Some(chat) = &mut state.active_chat {
+                let was_typing = chat.composer.typing_active;
                 chat.composer.editor.perform(action);
                 chat.composer.draft = chat.composer.editor.text();
+                let is_typing = !chat.composer.draft.trim().is_empty();
+                chat.composer.typing_active = is_typing;
+                if was_typing != is_typing {
+                    return schedule_send_typing_task(
+                        bridge,
+                        chat.channel_id,
+                        chat.channel_type,
+                        is_typing,
+                    );
+                }
             }
             Task::none()
         }
@@ -1389,6 +1566,50 @@ pub fn update(
             channel_type,
             client_txn_id,
         } => handle_retry_send_pressed(state, bridge, channel_id, channel_type, client_txn_id),
+
+        AppMessage::RevokeMessagePressed {
+            channel_id,
+            channel_type: _,
+            server_message_id,
+        } => {
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.revoke_message(channel_id, server_message_id).await },
+                move |result| match result {
+                    Ok(_) => AppMessage::RevokeMessageSucceeded { server_message_id },
+                    Err(error) => AppMessage::RevokeMessageFailed {
+                        server_message_id,
+                        error,
+                    },
+                },
+            )
+        }
+
+        AppMessage::RevokeMessageSucceeded { server_message_id } => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(item) = chat
+                    .timeline
+                    .items
+                    .iter_mut()
+                    .find(|item| item.server_message_id == Some(server_message_id))
+                {
+                    item.is_deleted = true;
+                }
+            }
+            schedule_session_list_refresh(state, bridge)
+        }
+
+        AppMessage::RevokeMessageFailed {
+            server_message_id,
+            error,
+        } => {
+            warn!(
+                "revoke message failed: server_message_id={} error={}",
+                server_message_id,
+                format_ui_error(&error)
+            );
+            Task::none()
+        }
 
         AppMessage::GlobalMessageIngress {
             message_id,
@@ -1575,6 +1796,18 @@ fn add_friend_search_window_settings() -> window::Settings {
     }
 }
 
+fn logs_window_settings() -> window::Settings {
+    window::Settings {
+        size: Size::new(900.0, 620.0),
+        min_size: Some(Size::new(680.0, 420.0)),
+        resizable: true,
+        decorations: true,
+        level: window::Level::Normal,
+        position: window::Position::Centered,
+        ..window::Settings::default()
+    }
+}
+
 fn handle_conversation_selected(
     state: &mut AppState,
     bridge: &Arc<dyn SdkBridge>,
@@ -1602,6 +1835,7 @@ fn handle_conversation_selected(
         runtime_index: RuntimeMessageIndex::default(),
         composer: ComposerState::default(),
         unread_marker: UnreadMarkerVm::default(),
+        typing_hint: None,
         preview_image_path: None,
         attachment_menu: None,
     });
@@ -1689,14 +1923,41 @@ fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> S
 
     if let Some(selection) = state.add_friend.selected_panel_item {
         return match selection {
-            AddFriendSelectionVm::Friend(user_id) | AddFriendSelectionVm::Request(user_id) => {
-                format!("UID {user_id}")
-            }
-            AddFriendSelectionVm::Group(group_id) => format!("群组 {group_id}"),
+            AddFriendSelectionVm::Friend(user_id) => state
+                .add_friend
+                .friends
+                .iter()
+                .find(|item| item.user_id == user_id)
+                .map(|item| item.title.trim())
+                .filter(|title| !title.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "联系人".to_string()),
+            AddFriendSelectionVm::Request(user_id) => state
+                .add_friend
+                .requests
+                .iter()
+                .find(|item| item.from_user_id == user_id)
+                .map(|item| item.title.trim())
+                .filter(|title| !title.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "联系人".to_string()),
+            AddFriendSelectionVm::Group(group_id) => state
+                .add_friend
+                .groups
+                .iter()
+                .find(|item| item.group_id == group_id)
+                .map(|item| item.title.trim())
+                .filter(|title| !title.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "群聊".to_string()),
         };
     }
 
-    format!("会话 {}", channel_id)
+    if channel_type == 2 {
+        "群聊".to_string()
+    } else {
+        "联系人".to_string()
+    }
 }
 
 fn resolve_chat_peer_user_id(state: &AppState, channel_id: u64, channel_type: i32) -> Option<u64> {
@@ -2029,6 +2290,26 @@ fn handle_login_submit(
     )
 }
 
+fn schedule_send_typing_task(
+    bridge: &Arc<dyn SdkBridge>,
+    channel_id: u64,
+    channel_type: i32,
+    is_typing: bool,
+) -> Task<AppMessage> {
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move {
+            bridge
+                .send_typing(channel_id, channel_type, is_typing)
+                .await
+        },
+        move |result| match result {
+            Ok(_) => AppMessage::TypingSendCompleted { is_typing },
+            Err(error) => AppMessage::TypingSendFailed { is_typing, error },
+        },
+    )
+}
+
 fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
     let (body, channel_id, channel_type, open_token) = match state.active_chat.as_ref() {
         Some(chat_snapshot) => {
@@ -2092,13 +2373,14 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         chat.composer.draft.clear();
         chat.composer.editor = iced::widget::text_editor::Content::new();
         chat.composer.emoji_picker_open = false;
+        chat.composer.typing_active = false;
     }
     touch_session_preview(state, channel_id, channel_type, &body, now);
 
-    let bridge = Arc::clone(bridge);
-    Task::perform(
+    let send_bridge = Arc::clone(bridge);
+    let send_task = Task::perform(
         async move {
-            bridge
+            send_bridge
                 .send_text_message(channel_id, channel_type, client_txn_id, body)
                 .await
         },
@@ -2125,7 +2407,11 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
                 }
             }
         },
-    )
+    );
+    Task::batch([
+        send_task,
+        schedule_send_typing_task(bridge, channel_id, channel_type, false),
+    ])
 }
 
 fn attachment_type_body_and_preview(path: &Path) -> (i32, String, String) {
@@ -2470,6 +2756,7 @@ fn handle_global_message_loaded(
     };
 
     reporting::report_message_loaded(source, &message);
+    maybe_play_message_notification_sound(state, source, &message);
     apply_global_message_to_active_chat(state, message);
     Task::batch([
         schedule_session_list_refresh(state, bridge),
@@ -2954,6 +3241,145 @@ fn format_ui_error(error: &crate::presentation::vm::UiError) -> String {
     }
 }
 
+enum ClipboardPastePayload {
+    AttachmentPath(String),
+    PlainText(String),
+}
+
+fn copy_text_to_clipboard(value: &str) -> Result<(), crate::presentation::vm::UiError> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("初始化剪贴板失败: {error}"))
+    })?;
+    clipboard.set_text(value.to_string()).map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("写入剪贴板失败: {error}"))
+    })
+}
+
+fn handle_composer_paste_pressed(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    if state.active_chat.is_none() {
+        return Task::none();
+    }
+
+    let payload = match read_clipboard_payload(state.auth.user_id.unwrap_or(0)) {
+        Ok(payload) => payload,
+        Err(error) => {
+            state.auth.error = Some(format!("读取剪贴板失败: {}", format_ui_error(&error)));
+            return Task::none();
+        }
+    };
+
+    match payload {
+        Some(ClipboardPastePayload::AttachmentPath(path)) => {
+            Task::done(AppMessage::ComposerAttachmentPicked { path: Some(path) })
+        }
+        Some(ClipboardPastePayload::PlainText(text)) => {
+            if text.trim().is_empty() {
+                return Task::none();
+            }
+            if let Some(chat) = &mut state.active_chat {
+                let was_typing = chat.composer.typing_active;
+                if chat.composer.draft.is_empty() {
+                    chat.composer.draft = text;
+                } else {
+                    chat.composer.draft.push_str(&text);
+                }
+                chat.composer.editor =
+                    iced::widget::text_editor::Content::with_text(&chat.composer.draft);
+                let is_typing = !chat.composer.draft.trim().is_empty();
+                chat.composer.typing_active = is_typing;
+                if was_typing != is_typing {
+                    return schedule_send_typing_task(
+                        bridge,
+                        chat.channel_id,
+                        chat.channel_type,
+                        is_typing,
+                    );
+                }
+            }
+            Task::none()
+        }
+        None => Task::none(),
+    }
+}
+
+fn read_clipboard_payload(
+    user_id: u64,
+) -> Result<Option<ClipboardPastePayload>, crate::presentation::vm::UiError> {
+    let mut clipboard = arboard::Clipboard::new().map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("初始化剪贴板失败: {error}"))
+    })?;
+
+    if let Ok(image) = clipboard.get_image() {
+        let path = save_clipboard_image(user_id, image)?;
+        return Ok(Some(ClipboardPastePayload::AttachmentPath(path)));
+    }
+
+    if let Ok(text) = clipboard.get_text() {
+        if let Some(path) = parse_clipboard_file_path(&text) {
+            return Ok(Some(ClipboardPastePayload::AttachmentPath(path)));
+        }
+        return Ok(Some(ClipboardPastePayload::PlainText(text)));
+    }
+
+    Ok(None)
+}
+
+fn parse_clipboard_file_path(raw: &str) -> Option<String> {
+    let first = raw.lines().next()?.trim();
+    if first.is_empty() {
+        return None;
+    }
+
+    let trimmed = first
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim_matches('<')
+        .trim_matches('>');
+    let normalized = if let Some(path) = trimmed.strip_prefix("file://") {
+        path.replace("%20", " ")
+    } else {
+        trimmed.to_string()
+    };
+
+    let path = Path::new(&normalized);
+    if path.exists() && path.is_file() {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn save_clipboard_image(
+    user_id: u64,
+    image_data: arboard::ImageData<'_>,
+) -> Result<String, crate::presentation::vm::UiError> {
+    let width = image_data.width as u32;
+    let height = image_data.height as u32;
+    let bytes = image_data.bytes.into_owned();
+    let image = image::RgbaImage::from_raw(width, height, bytes).ok_or_else(|| {
+        crate::presentation::vm::UiError::Unknown("剪贴板图片解码失败".to_string())
+    })?;
+
+    let base = Path::new("/tmp")
+        .join("privchat-iced")
+        .join("clipboard")
+        .join(user_id.to_string());
+    fs::create_dir_all(&base).map_err(|error| {
+        crate::presentation::vm::UiError::Unknown(format!("创建剪贴板缓存目录失败: {error}"))
+    })?;
+    let file_name = format!("paste-{}.png", now_timestamp_millis());
+    let target = base.join(file_name);
+    image
+        .save_with_format(&target, image::ImageFormat::Png)
+        .map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!("写入剪贴板图片失败: {error}"))
+        })?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 fn schedule_thumbnail_downloads_for_items(
     state: &mut AppState,
     items: &[MessageVm],
@@ -3230,6 +3656,61 @@ fn open_with_system(target: &str) -> Result<(), crate::presentation::vm::UiError
         })
 }
 
+fn append_runtime_log(state: &mut AppState, level: &str, text: &str) {
+    let line = format!(
+        "[{}][{}] {}",
+        chrono::Local::now().format("%H:%M:%S"),
+        level,
+        text
+    );
+    if state.runtime_logs.len() >= MAX_RUNTIME_LOGS {
+        let _ = state.runtime_logs.pop_front();
+    }
+    state.runtime_logs.push_back(line);
+}
+
+fn truncate_log_line(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(max_chars + 3);
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            break;
+        }
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
+}
+
+fn maybe_play_message_notification_sound(
+    state: &mut AppState,
+    source: MessageIngressSource,
+    message: &MessageVm,
+) {
+    if !state.settings.notification_sound_enabled {
+        return;
+    }
+    if message.is_own || message.is_deleted || message.server_message_id.is_none() {
+        return;
+    }
+    if source != MessageIngressSource::TimelineUpdated {
+        return;
+    }
+    if let Some(chat) = &state.active_chat {
+        if matches!(state.route, Route::Chat)
+            && chat.channel_id == message.channel_id
+            && chat.channel_type == message.channel_type
+        {
+            return;
+        }
+    }
+
+    print!("\x07");
+    let _ = std::io::stdout().flush();
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -3418,6 +3899,23 @@ mod tests {
             Err(UiError::Unknown("unused".to_string()))
         }
 
+        async fn send_typing(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+            _is_typing: bool,
+        ) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn revoke_message(
+            &self,
+            _channel_id: u64,
+            _server_message_id: u64,
+        ) -> Result<(), UiError> {
+            Ok(())
+        }
+
         async fn load_history_before(
             &self,
             _channel_id: u64,
@@ -3463,6 +3961,7 @@ mod tests {
             runtime_index: RuntimeMessageIndex::default(),
             composer: ComposerState::default(),
             unread_marker: UnreadMarkerVm::default(),
+            typing_hint: None,
             preview_image_path: None,
             attachment_menu: None,
         });

@@ -82,7 +82,20 @@ pub fn view(
         .into()
     };
 
-    let content: Element<'_, AppMessage> = if message.message_type == IMAGE_MESSAGE_TYPE {
+    let content: Element<'_, AppMessage> = if message.is_deleted {
+        text(if message.is_own {
+            "你撤回了一条消息"
+        } else {
+            "对方撤回了一条消息"
+        })
+        .size(14)
+        .color(if message.is_own {
+            Color::from_rgb8(0x2D, 0x36, 0x2D)
+        } else {
+            Color::from_rgb8(0xB7, 0xBE, 0xC8)
+        })
+        .into()
+    } else if message.message_type == IMAGE_MESSAGE_TYPE {
         if render_media_preview
             && (message.media_local_path.is_some() || message.media_url.is_some())
         {
@@ -218,13 +231,26 @@ pub fn view(
         );
     }
     if message.is_own {
+        if !message.is_deleted {
+            if let Some(server_message_id) = message.server_message_id {
+                body = body.push(
+                    button(text("撤回").size(11))
+                        .style(retry_button_style)
+                        .on_press(AppMessage::RevokeMessagePressed {
+                            channel_id: message.channel_id,
+                            channel_type: message.channel_type,
+                            server_message_id,
+                        }),
+                );
+            }
+        }
         if let Some(send_state) = &message.send_state {
             if matches!(send_state, MessageSendStateVm::FailedRetryable { .. })
                 && message.server_message_id.is_none()
             {
                 if let Some(client_txn_id) = message.client_txn_id {
                     body = body.push(
-                        button(text("Retry").size(11))
+                        button(text("重试").size(11))
                             .style(retry_button_style)
                             .on_press(AppMessage::RetrySendPressed {
                                 channel_id: message.channel_id,

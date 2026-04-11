@@ -21,12 +21,13 @@ pub fn view<'a>(
     chat: &'a ChatScreenState,
     title: &'a str,
     presence: Option<&'a PresenceVm>,
+    typing_hint: Option<&'a str>,
 ) -> Element<'a, AppMessage> {
     let header_title = column![
         text(title)
             .size(17)
             .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
-        presence_status_text(presence),
+        presence_status_text(presence, typing_hint),
     ]
     .spacing(3);
     let header = container(
@@ -157,7 +158,17 @@ pub fn view<'a>(
         .into()
 }
 
-fn presence_status_text<'a>(presence: Option<&'a PresenceVm>) -> Element<'a, AppMessage> {
+fn presence_status_text<'a>(
+    presence: Option<&'a PresenceVm>,
+    typing_hint: Option<&'a str>,
+) -> Element<'a, AppMessage> {
+    if let Some(text) = typing_hint.filter(|value| !value.trim().is_empty()) {
+        return iced::widget::text(text)
+            .size(12)
+            .color(Color::from_rgb8(0x22, 0xC5, 0x5E))
+            .into();
+    }
+
     let Some(presence) = presence else {
         return container(text("")).into();
     };

@@ -44,7 +44,12 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
                 let active_presence = chat_state
                     .peer_user_id
                     .and_then(|user_id| state.presences.get(&user_id));
-                chat::view(chat_state, active_title, active_presence)
+                chat::view(
+                    chat_state,
+                    active_title,
+                    active_presence,
+                    chat_state.typing_hint.as_deref(),
+                )
             } else {
                 empty_detail("请选择一个会话")
             }
@@ -325,6 +330,18 @@ fn settings_menu_popup() -> Element<'static, AppMessage> {
             .width(Length::Fill)
             .style(menu_item_style)
             .on_press(AppMessage::SettingsMenuSwitchAccount),
+            button(
+                container(
+                    text("日志窗口")
+                        .size(14)
+                        .color(Color::from_rgb8(0xE6, 0xEB, 0xF2))
+                )
+                .width(Length::Fill)
+                .padding([8, 12]),
+            )
+            .width(Length::Fill)
+            .style(menu_item_style)
+            .on_press(AppMessage::SettingsMenuOpenLogs),
             button(
                 container(
                     text("退出")

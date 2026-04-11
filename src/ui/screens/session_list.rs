@@ -68,7 +68,7 @@ pub fn view(
 }
 
 fn search_bar() -> Element<'static, AppMessage> {
-    let search_input = text_input("Search", "")
+    let search_input = text_input("搜索", "")
         .on_input(|_| AppMessage::Noop)
         .padding([8, 10])
         .size(14)

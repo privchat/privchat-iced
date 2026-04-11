@@ -131,8 +131,20 @@ pub enum AppMessage {
     ToggleSettingsMenu,
     DismissSettingsMenu,
     SettingsMenuOpenSettings,
+    SettingsMenuOpenLogs,
     SettingsMenuSwitchAccount,
     SettingsMenuLogout,
+    LogsWindowOpened {
+        window_id: window::Id,
+    },
+    CloseLogsWindow,
+    CopyLogsPressed,
+    ClearLogsPressed,
+    ExportLogsPressed,
+    LogsExportSelected {
+        save_path: Option<String>,
+    },
+    ToggleNotificationSound,
     CloseSwitchAccountPanel,
     SwitchAccountListLoaded {
         accounts: Vec<LocalAccountVm>,
@@ -199,6 +211,19 @@ pub enum AppMessage {
     PresenceChanged {
         presence: PresenceVm,
     },
+    TypingStatusChanged {
+        channel_id: u64,
+        channel_type: i32,
+        user_id: u64,
+        is_typing: bool,
+    },
+    TypingSendCompleted {
+        is_typing: bool,
+    },
+    TypingSendFailed {
+        is_typing: bool,
+        error: UiError,
+    },
     RetryOpenConversation {
         channel_id: u64,
         channel_type: i32,
@@ -207,6 +232,7 @@ pub enum AppMessage {
     ComposerInputChanged {
         text: String,
     },
+    ComposerPastePressed,
     ToggleEmojiPicker,
     DismissEmojiPicker,
     EmojiPicked {
@@ -321,6 +347,10 @@ pub enum AppMessage {
     AddFriendRequestFailed {
         error: UiError,
     },
+    CopyDetailFieldPressed {
+        label: String,
+        value: String,
+    },
     ComposerEdited {
         action: text_editor::Action,
     },
@@ -329,6 +359,18 @@ pub enum AppMessage {
         channel_id: u64,
         channel_type: i32,
         client_txn_id: ClientTxnId,
+    },
+    RevokeMessagePressed {
+        channel_id: u64,
+        channel_type: i32,
+        server_message_id: u64,
+    },
+    RevokeMessageSucceeded {
+        server_message_id: u64,
+    },
+    RevokeMessageFailed {
+        server_message_id: u64,
+        error: UiError,
     },
     GlobalMessageIngress {
         message_id: u64,

@@ -12,12 +12,14 @@ use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
     AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
     FriendAcceptResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
-    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse,
+    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse, MessageRevokeRequest,
+    MessageRevokeResponse,
     GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
     MessageStatusReadPtsResponse,
 };
 use privchat_sdk::{
     NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend,
+    TypingActionType,
 };
 use tokio::sync::broadcast::error::RecvError;
 
@@ -185,6 +187,13 @@ pub trait SdkBridge: Send + Sync + 'static {
         client_txn_id: ClientTxnId,
         file_path: String,
     ) -> Result<u64, UiError>;
+    async fn send_typing(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+        is_typing: bool,
+    ) -> Result<(), UiError>;
+    async fn revoke_message(&self, channel_id: u64, server_message_id: u64) -> Result<(), UiError>;
 
     async fn retry_send(
         &self,
@@ -1358,6 +1367,42 @@ impl SdkBridge for PrivchatSdkBridge {
         );
 
         Ok(local_row_message_id)
+    }
+
+    async fn send_typing(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+        is_typing: bool,
+    ) -> Result<(), UiError> {
+        self.sdk
+            .send_typing(
+                channel_id,
+                channel_type,
+                is_typing,
+                TypingActionType::Typing,
+            )
+            .await
+            .map_err(map_sdk_error)
+    }
+
+    async fn revoke_message(&self, channel_id: u64, server_message_id: u64) -> Result<(), UiError> {
+        let response: MessageRevokeResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::message::REVOKE,
+                &MessageRevokeRequest {
+                    server_message_id,
+                    channel_id,
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !response {
+            return Err(UiError::Unknown("撤回失败".to_string()));
+        }
+        Ok(())
     }
 
     async fn retry_send(

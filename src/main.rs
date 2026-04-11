@@ -63,6 +63,11 @@ fn view(app: &PrivchatApp, window_id: window::Id) -> Element<'_, AppMessage> {
     if app.state.add_friend_search_window_id == Some(window_id) {
         return ui::screens::add_friend::search_window_view(&app.state.add_friend);
     }
+    if app.state.logs_window_id == Some(window_id) {
+        let logs = app.state.runtime_logs.iter().cloned().collect::<Vec<_>>();
+        let feedback = app.state.settings.logs_feedback.clone();
+        return ui::screens::logs::view(logs, feedback);
+    }
 
     match app.state.route {
         Route::Splash => ui::screens::splash::view(),
@@ -83,7 +88,10 @@ fn subscription(app: &PrivchatApp) -> Subscription<AppMessage> {
 
 fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
     if app.state.add_friend_search_window_id == Some(window_id) {
-        return "Add Contacts".to_string();
+        return "添加联系人".to_string();
+    }
+    if app.state.logs_window_id == Some(window_id) {
+        return "PrivChat 日志窗口".to_string();
     }
 
     let my_name = app.state.auth.username.trim();
