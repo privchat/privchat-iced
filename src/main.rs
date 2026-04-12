@@ -163,7 +163,7 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
                 })
         });
 
-    match app.state.route {
+    let base_title = match app.state.route {
         Route::Chat | Route::SessionList => match active_chat_name {
             Some(peer_name) => format!("{peer_name} @ {my_name}"),
             None => "PrivChat".to_string(),
@@ -175,6 +175,16 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
         Route::Settings | Route::Splash | Route::Login | Route::SwitchAccount => {
             "PrivChat".to_string()
         }
+    };
+
+    match app.state.connection_title_state {
+        app::message::ConnectionTitleState::Disconnected => {
+            format!("{base_title}（未连接）")
+        }
+        app::message::ConnectionTitleState::Connecting => {
+            format!("{base_title}（连接中...）")
+        }
+        app::message::ConnectionTitleState::Connected => base_title,
     }
 }
 

@@ -44,7 +44,9 @@ pub fn view(
     };
 
     let time_text = format_message_time(message.created_at);
-    let footer: Element<'_, AppMessage> = if message.is_own {
+    let footer: Option<Element<'_, AppMessage>> = if message.is_deleted {
+        None
+    } else if message.is_own {
         // Any message resolved to a server id should be displayed as sent.
         // This avoids stale local failure labels after eventual queue success.
         let status_label = if message.server_message_id.is_some() {
@@ -57,37 +59,37 @@ pub fn view(
                 .unwrap_or("已发送")
         };
 
-        container(
-            row![
+        Some(
+            container(
+                row![
+                    text(time_text)
+                        .size(11)
+                        .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
+                    text(status_label)
+                        .size(11)
+                        .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.70)),
+                ]
+                .spacing(8),
+            )
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Left)
+            .into(),
+        )
+    } else {
+        Some(
+            container(
                 text(time_text)
                     .size(11)
-                    .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
-                text(status_label)
-                    .size(11)
-                    .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.70)),
-            ]
-            .spacing(8),
+                    .color(Color::from_rgb8(0x8E, 0x95, 0x9E)),
+            )
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Right)
+            .into(),
         )
-        .width(Length::Fill)
-        .align_x(alignment::Horizontal::Left)
-        .into()
-    } else {
-        container(
-            text(time_text)
-                .size(11)
-                .color(Color::from_rgb8(0x8E, 0x95, 0x9E)),
-        )
-        .width(Length::Fill)
-        .align_x(alignment::Horizontal::Right)
-        .into()
     };
 
     let content: Element<'_, AppMessage> = if message.is_deleted {
-        text(if message.is_own {
-            "你撤回了一条消息"
-        } else {
-            "对方撤回了一条消息"
-        })
+        text("消息已撤回")
         .size(14)
         .color(if message.is_own {
             Color::from_rgb8(0x2D, 0x36, 0x2D)
@@ -204,7 +206,12 @@ pub fn view(
             .into()
     };
 
-    let bubble = container(column![content, footer].spacing(8))
+    let mut bubble_content = column![content].spacing(8);
+    if let Some(footer) = footer {
+        bubble_content = bubble_content.push(footer);
+    }
+
+    let bubble = container(bubble_content)
         .max_width(560.0)
         .padding([10, 13])
         .style(move |_| container::Style {
@@ -229,6 +236,8 @@ pub fn view(
             ]
             .spacing(6),
         );
+    } else if opened_menu_message_id == Some(message.message_id) && !message.is_deleted {
+        body = body.push(row![small_menu_button("复制", AppMessage::TextMenuCopy)].spacing(6));
     }
     if message.is_own {
         if !message.is_deleted {
@@ -275,6 +284,10 @@ pub fn view(
     };
 
     let container_row = container(row).width(Length::Fill);
+    if message.is_deleted {
+        return container_row.into();
+    }
+
     if is_attachment {
         mouse_area(container_row)
             .on_right_press(AppMessage::ShowAttachmentMenu {
@@ -285,7 +298,12 @@ pub fn view(
             })
             .into()
     } else {
-        container_row.into()
+        mouse_area(container_row)
+            .on_right_press(AppMessage::ShowTextMenu {
+                message_id: message.message_id,
+                text: message.body.clone(),
+            })
+            .into()
     }
 }
 

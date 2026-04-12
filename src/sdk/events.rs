@@ -1,10 +1,10 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use privchat_protocol::presence::{PresenceChangedNotification, TypingStatusNotification};
-use privchat_sdk::SdkEvent;
+use privchat_sdk::{ConnectionState, SdkEvent};
 use tracing::{info, warn};
 
-use crate::app::message::{AppMessage, MessageIngressSource};
+use crate::app::message::{AppMessage, ConnectionTitleState, MessageIngressSource};
 use crate::app::reporting;
 use crate::presentation::vm::{ClientTxnId, OpenToken, PresenceVm, TimelineRevision};
 
@@ -130,7 +130,16 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
     match event {
         SdkEvent::ConnectionStateChanged { from, to } => {
             info!("sdk_event: connection_state_changed {:?} -> {:?}", from, to);
-            AppMessage::Noop
+            let state = match to {
+                ConnectionState::Authenticated => ConnectionTitleState::Connected,
+                ConnectionState::Connected | ConnectionState::LoggedIn => {
+                    ConnectionTitleState::Connecting
+                }
+                ConnectionState::New | ConnectionState::Shutdown => {
+                    ConnectionTitleState::Disconnected
+                }
+            };
+            AppMessage::ConnectionTitleStateChanged { state }
         }
         SdkEvent::NetworkHintChanged { from, to } => {
             info!("sdk_event: network_hint_changed {:?} -> {:?}", from, to);

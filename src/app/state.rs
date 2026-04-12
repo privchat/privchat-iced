@@ -4,6 +4,7 @@ use iced::widget::text_editor;
 use iced::window;
 
 use crate::app::auth_prefs;
+use crate::app::message::ConnectionTitleState;
 use crate::app::route::Route;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
@@ -169,6 +170,7 @@ pub struct ComposerState {
     pub editor: text_editor::Content,
     pub emoji_picker_open: bool,
     pub typing_active: bool,
+    pub pending_attachment: Option<PendingAttachmentState>,
 }
 
 impl std::fmt::Debug for ComposerState {
@@ -178,6 +180,7 @@ impl std::fmt::Debug for ComposerState {
             .field("sending_disabled", &self.sending_disabled)
             .field("emoji_picker_open", &self.emoji_picker_open)
             .field("typing_active", &self.typing_active)
+            .field("pending_attachment", &self.pending_attachment)
             .finish()
     }
 }
@@ -190,8 +193,16 @@ impl Default for ComposerState {
             editor: text_editor::Content::new(),
             emoji_picker_open: false,
             typing_active: false,
+            pending_attachment: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingAttachmentState {
+    pub path: String,
+    pub filename: String,
+    pub is_image: bool,
 }
 
 #[derive(Debug, Default)]
@@ -269,6 +280,7 @@ pub struct AttachmentMenuState {
     pub local_path: Option<String>,
     pub file_id: Option<u64>,
     pub filename: String,
+    pub copy_text: Option<String>,
 }
 
 #[derive(Debug)]
@@ -287,6 +299,7 @@ pub struct AppState {
     pub overlay: OverlayState,
     pub switch_account: SwitchAccountState,
     pub runtime_logs: VecDeque<String>,
+    pub connection_title_state: ConnectionTitleState,
     /// Monotonic counter bumped on every account switch / login / restore.
     /// Included in the SDK event subscription hash so Iced recreates the stream.
     pub session_epoch: u64,
@@ -330,6 +343,7 @@ impl AppState {
             overlay: OverlayState::default(),
             switch_account: SwitchAccountState::default(),
             runtime_logs: VecDeque::new(),
+            connection_title_state: ConnectionTitleState::Disconnected,
             session_epoch: 0,
             media_downloads_inflight: HashSet::new(),
             next_open_token: 1,

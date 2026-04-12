@@ -1,4 +1,4 @@
-use iced::widget::{column, container, image, mouse_area, row, stack, text};
+use iced::widget::{button, column, container, image, mouse_area, row, stack, text};
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
@@ -152,6 +152,83 @@ pub fn view<'a>(
         content
     };
 
+    let content: Element<'_, AppMessage> = if let Some(pending) = &chat.composer.pending_attachment
+    {
+        let title = if pending.is_image {
+            "发送图片"
+        } else {
+            "发送文件"
+        };
+        let preview: Element<'_, AppMessage> = if pending.is_image {
+            container(
+                image(pending.path.clone())
+                    .width(Length::Fixed(300.0))
+                    .height(Length::Fixed(180.0))
+                    .content_fit(iced::ContentFit::Contain),
+            )
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Center)
+            .into()
+        } else {
+            container(text("📎").size(34).color(Color::from_rgb8(0xAF, 0xB6, 0xC1)))
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .into()
+        };
+
+        stack![
+            content,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.62))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::ComposerAttachmentSendCanceled),
+            container(
+                column![
+                    text(title).size(18).color(Color::from_rgb8(0xEA, 0xEE, 0xF3)),
+                    preview,
+                    text(&pending.filename)
+                        .size(14)
+                        .color(Color::from_rgb8(0xC1, 0xC8, 0xD2)),
+                    row![
+                        button(text("取消").size(14))
+                            .padding([8, 18])
+                            .on_press(AppMessage::ComposerAttachmentSendCanceled),
+                        button(text("发送").size(14))
+                            .padding([8, 18])
+                            .on_press(AppMessage::ComposerAttachmentSendConfirmed),
+                    ]
+                    .spacing(10)
+                ]
+                .spacing(12)
+                .align_x(alignment::Horizontal::Center)
+            )
+            .padding([14, 18])
+            .width(Length::Fixed(360.0))
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb8(0x25, 0x2A, 0x31))),
+                border: border::width(1.0)
+                    .color(Color::from_rgb8(0x3A, 0x41, 0x4B))
+                    .rounded(10.0),
+                ..container::Style::default()
+            })
+            .align_x(alignment::Horizontal::Center)
+            .align_y(alignment::Vertical::Center)
+            .width(Length::Fill)
+            .height(Length::Fill)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        content
+    };
+
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
@@ -162,37 +239,51 @@ fn presence_status_text<'a>(
     presence: Option<&'a PresenceVm>,
     typing_hint: Option<&'a str>,
 ) -> Element<'a, AppMessage> {
-    if let Some(text) = typing_hint.filter(|value| !value.trim().is_empty()) {
-        return iced::widget::text(text)
-            .size(12)
-            .color(Color::from_rgb8(0x22, 0xC5, 0x5E))
-            .into();
+    let typing_text = typing_hint.filter(|value| !value.trim().is_empty());
+    let presence_status = presence.map(presence_status_bucket);
+
+    match (presence_status, typing_text) {
+        (Some((status_label, status_color)), Some(typing_label)) => row![
+            text(status_label).size(12).color(status_color),
+            text("·").size(12).color(Color::from_rgb8(0x6B, 0x73, 0x7D)),
+            text(typing_label).size(12).color(C_STATUS_ONLINE),
+        ]
+        .spacing(6)
+        .align_y(alignment::Vertical::Center)
+        .into(),
+        (Some((status_label, status_color)), None) => {
+            text(status_label).size(12).color(status_color).into()
+        }
+        (None, Some(typing_label)) => text(typing_label).size(12).color(C_STATUS_ONLINE).into(),
+        (None, None) => container(text("")).into(),
     }
-
-    let Some(presence) = presence else {
-        return container(text("")).into();
-    };
-
-    let (label, color) = if presence.is_online {
-        ("在线".to_string(), C_STATUS_ONLINE)
-    } else if presence.last_seen_at > 0 {
-        (
-            format!("最近在线 {}", format_presence_time(presence.last_seen_at)),
-            C_STATUS_OFFLINE,
-        )
-    } else {
-        ("离线".to_string(), C_STATUS_OFFLINE)
-    };
-
-    text(label).size(12).color(color).into()
 }
 
-fn format_presence_time(timestamp_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
-        .map(|dt| {
-            dt.with_timezone(&chrono::Local)
-                .format("%m-%d %H:%M")
-                .to_string()
-        })
-        .unwrap_or_else(|| "--:--".to_string())
+fn presence_status_bucket(presence: &PresenceVm) -> (String, Color) {
+    if presence.is_online {
+        return ("在线".to_string(), C_STATUS_ONLINE);
+    }
+
+    let last_seen_at = presence.last_seen_at;
+    if last_seen_at <= 0 {
+        return ("很久没有上线".to_string(), C_STATUS_OFFLINE);
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let elapsed_ms = now_ms.saturating_sub(last_seen_at);
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+
+    let label = if elapsed_ms < day_ms {
+        "不久前在线"
+    } else if elapsed_ms < 7 * day_ms {
+        "1天前在线"
+    } else if elapsed_ms < 30 * day_ms {
+        "7天前在线"
+    } else if elapsed_ms < 90 * day_ms {
+        "30天前在线"
+    } else {
+        "很久没有上线"
+    };
+
+    (label.to_string(), C_STATUS_OFFLINE)
 }

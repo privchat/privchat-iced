@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use iced::{window, Size, Task};
 use privchat_protocol::message::ContentMessageType;
+use tokio::time::{sleep, Duration};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -15,7 +16,8 @@ use crate::app::message::{AppMessage, MessageIngressSource};
 use crate::app::reporting::{self, TimelinePatchKind};
 use crate::app::route::Route;
 use crate::app::state::{
-    AppState, ChatScreenState, ComposerState, RuntimeMessageIndex, TimelineState,
+    AppState, ChatScreenState, ComposerState, PendingAttachmentState, RuntimeMessageIndex,
+    TimelineState,
 };
 use crate::presentation::vm::{
     AddFriendSelectionVm, ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey,
@@ -37,6 +39,7 @@ const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
 const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
 const MAX_RUNTIME_LOGS: usize = 1200;
+const TYPING_HINT_TTL_MILLIS: u64 = 4_000;
 
 /// Sole mutation entry point.
 pub fn update(
@@ -136,7 +139,13 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::RefreshSessionList => schedule_session_list_refresh(state, bridge),
+        AppMessage::RefreshSessionList => {
+            let mut tasks = vec![schedule_session_list_refresh(state, bridge)];
+            if let Some(task) = schedule_active_conversation_refresh(state, bridge) {
+                tasks.push(task);
+            }
+            Task::batch(tasks)
+        }
 
         AppMessage::RepairChannelSyncRequested {
             channel_id,
@@ -241,6 +250,11 @@ pub fn update(
         }
 
         AppMessage::RefreshTotalUnreadCount => schedule_total_unread_refresh(bridge),
+
+        AppMessage::ConnectionTitleStateChanged { state: next_state } => {
+            state.connection_title_state = next_state;
+            Task::none()
+        }
 
         AppMessage::LoginUsernameChanged { text } => {
             state.auth.username = text;
@@ -765,6 +779,46 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::ActiveConversationRefreshed {
+            channel_id,
+            channel_type,
+            open_token,
+            snapshot,
+        } => {
+            if !pass_dual_guard(state, channel_id, channel_type, open_token) {
+                return Task::none();
+            }
+            if let Some(chat) = &mut state.active_chat {
+                chat.timeline.revision = snapshot.revision;
+                chat.timeline.items = snapshot.items;
+                normalize_timeline_items(&mut chat.timeline.items);
+                chat.timeline.oldest_server_message_id = snapshot.oldest_server_message_id;
+                chat.timeline.has_more_before = snapshot.has_more_before;
+                chat.unread_marker = snapshot.unread_marker;
+                chat.runtime_index.rebuild_from_items(&chat.timeline.items);
+            }
+            let media_items = state
+                .active_chat
+                .as_ref()
+                .map(|chat| chat.timeline.items.clone())
+                .unwrap_or_default();
+            let mut tasks = schedule_thumbnail_downloads_for_items(state, &media_items, bridge);
+            tasks.push(schedule_total_unread_refresh(bridge));
+            Task::batch(tasks)
+        }
+
+        AppMessage::ActiveConversationRefreshFailed {
+            channel_id,
+            channel_type,
+            open_token,
+            error: _,
+        } => {
+            if !pass_dual_guard(state, channel_id, channel_type, open_token) {
+                return Task::none();
+            }
+            Task::none()
+        }
+
         AppMessage::RetryOpenConversation {
             channel_id,
             channel_type,
@@ -793,6 +847,23 @@ pub fn update(
                     } else {
                         None
                     };
+                }
+            }
+            if is_typing {
+                schedule_typing_hint_expire_task(channel_id, channel_type, user_id)
+            } else {
+                Task::none()
+            }
+        }
+
+        AppMessage::TypingHintExpired {
+            channel_id,
+            channel_type,
+            user_id: _,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id && chat.channel_type == channel_type {
+                    chat.typing_hint = None;
                 }
             }
             Task::none()
@@ -1196,10 +1267,52 @@ pub fn update(
             |path| AppMessage::ComposerAttachmentPicked { path },
         ),
 
-        AppMessage::ComposerAttachmentPicked { path } => match path {
-            Some(path) => handle_send_attachment_path(state, bridge, path),
-            None => Task::none(),
-        },
+        AppMessage::ComposerAttachmentPicked { path } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.pending_attachment = path.and_then(|value| {
+                    let trimmed = value.trim().to_string();
+                    if trimmed.is_empty() {
+                        return None;
+                    }
+                    let filename = Path::new(&trimmed)
+                        .file_name()
+                        .and_then(|part| part.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    Some(PendingAttachmentState {
+                        is_image: is_image_file_path(&trimmed),
+                        path: trimmed,
+                        filename,
+                    })
+                });
+            }
+            Task::none()
+        }
+
+        AppMessage::ComposerAttachmentSendConfirmed => {
+            let Some(chat) = state.active_chat.as_ref() else {
+                return Task::none();
+            };
+            let Some(path) = chat
+                .composer
+                .pending_attachment
+                .as_ref()
+                .map(|pending| pending.path.clone())
+            else {
+                return Task::none();
+            };
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.pending_attachment = None;
+            }
+            handle_send_attachment_path(state, bridge, path)
+        }
+
+        AppMessage::ComposerAttachmentSendCanceled => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.pending_attachment = None;
+            }
+            Task::none()
+        }
 
         AppMessage::OpenImagePreview {
             message_id,
@@ -1283,6 +1396,20 @@ pub fn update(
                     local_path,
                     file_id,
                     filename,
+                    copy_text: None,
+                });
+            }
+            Task::none()
+        }
+
+        AppMessage::ShowTextMenu { message_id, text } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
+                    message_id,
+                    local_path: None,
+                    file_id: None,
+                    filename: String::new(),
+                    copy_text: Some(text),
                 });
             }
             Task::none()
@@ -1293,6 +1420,27 @@ pub fn update(
                 chat.attachment_menu = None;
             }
             Task::none()
+        }
+
+        AppMessage::TextMenuCopy => {
+            let text_to_copy = state
+                .active_chat
+                .as_ref()
+                .and_then(|chat| chat.attachment_menu.as_ref())
+                .and_then(|menu| menu.copy_text.clone());
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            match text_to_copy {
+                Some(value) => match copy_text_to_clipboard(&value) {
+                    Ok(()) => Task::none(),
+                    Err(error) => {
+                        state.auth.error = Some(format!("复制失败: {}", format_ui_error(&error)));
+                        Task::none()
+                    }
+                },
+                None => Task::none(),
+            }
         }
 
         AppMessage::AttachmentMenuOpen => {
@@ -1603,11 +1751,32 @@ pub fn update(
             server_message_id,
             error,
         } => {
+            if is_already_revoked_error(&error) {
+                if let Some(chat) = &mut state.active_chat {
+                    if let Some(item) = chat
+                        .timeline
+                        .items
+                        .iter_mut()
+                        .find(|item| item.server_message_id == Some(server_message_id))
+                    {
+                        item.is_deleted = true;
+                    }
+                }
+                return schedule_session_list_refresh(state, bridge);
+            }
+            let error_text = format_ui_error(&error);
+            let ui_text = if is_revoke_timeout_error(&error) {
+                "撤回失败：消息发送超过 2 分钟，服务器已拒绝撤回".to_string()
+            } else {
+                format!("撤回失败：{error_text}")
+            };
             warn!(
                 "revoke message failed: server_message_id={} error={}",
                 server_message_id,
-                format_ui_error(&error)
+                error_text
             );
+            append_runtime_log(state, "WARN", &ui_text);
+            state.auth.error = Some(ui_text);
             Task::none()
         }
 
@@ -2128,6 +2297,34 @@ fn schedule_session_list_refresh(
     )
 }
 
+fn schedule_active_conversation_refresh(
+    state: &AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Option<Task<AppMessage>> {
+    let chat = state.active_chat.as_ref()?;
+    let channel_id = chat.channel_id;
+    let channel_type = chat.channel_type;
+    let open_token = chat.open_token;
+    let bridge = Arc::clone(bridge);
+    Some(Task::perform(
+        async move { bridge.open_timeline(channel_id, channel_type).await },
+        move |result| match result {
+            Ok(snapshot) => AppMessage::ActiveConversationRefreshed {
+                channel_id,
+                channel_type,
+                open_token,
+                snapshot,
+            },
+            Err(error) => AppMessage::ActiveConversationRefreshFailed {
+                channel_id,
+                channel_type,
+                open_token,
+                error,
+            },
+        },
+    ))
+}
+
 fn schedule_total_unread_refresh(bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
     let bridge = Arc::clone(bridge);
     Task::perform(
@@ -2310,6 +2507,24 @@ fn schedule_send_typing_task(
     )
 }
 
+fn schedule_typing_hint_expire_task(
+    channel_id: u64,
+    channel_type: i32,
+    user_id: u64,
+) -> Task<AppMessage> {
+    Task::perform(
+        async move {
+            sleep(Duration::from_millis(TYPING_HINT_TTL_MILLIS)).await;
+            AppMessage::TypingHintExpired {
+                channel_id,
+                channel_type,
+                user_id,
+            }
+        },
+        |message| message,
+    )
+}
+
 fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
     let (body, channel_id, channel_type, open_token) = match state.active_chat.as_ref() {
         Some(chat_snapshot) => {
@@ -2442,6 +2657,18 @@ fn attachment_type_body_and_preview(path: &Path) -> (i32, String, String) {
             "[文件]".to_string(),
         ),
     }
+}
+
+fn is_image_file_path(path: &str) -> bool {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.to_ascii_lowercase())
+        .unwrap_or_default();
+    matches!(
+        ext.as_str(),
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic"
+    )
 }
 
 fn handle_send_attachment_path(
@@ -3241,6 +3468,17 @@ fn format_ui_error(error: &crate::presentation::vm::UiError) -> String {
     }
 }
 
+fn is_already_revoked_error(error: &crate::presentation::vm::UiError) -> bool {
+    format_ui_error(error).contains("已被撤回")
+}
+
+fn is_revoke_timeout_error(error: &crate::presentation::vm::UiError) -> bool {
+    let text = format_ui_error(error);
+    text.contains("撤回时限")
+        || text.contains("超过")
+            && (text.contains("2分钟") || text.contains("120") || text.contains("时限"))
+}
+
 enum ClipboardPastePayload {
     AttachmentPath(String),
     PlainText(String),
@@ -3281,13 +3519,10 @@ fn handle_composer_paste_pressed(
             }
             if let Some(chat) = &mut state.active_chat {
                 let was_typing = chat.composer.typing_active;
-                if chat.composer.draft.is_empty() {
-                    chat.composer.draft = text;
-                } else {
-                    chat.composer.draft.push_str(&text);
-                }
-                chat.composer.editor =
-                    iced::widget::text_editor::Content::with_text(&chat.composer.draft);
+                chat.composer.editor.perform(iced::widget::text_editor::Action::Edit(
+                    iced::widget::text_editor::Edit::Paste(Arc::new(text)),
+                ));
+                chat.composer.draft = chat.composer.editor.text();
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
                 if was_typing != is_typing {

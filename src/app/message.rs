@@ -27,6 +27,13 @@ impl MessageIngressSource {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionTitleState {
+    Disconnected,
+    Connecting,
+    Connected,
+}
+
 #[derive(Debug, Clone)]
 pub enum AppMessage {
     Noop,
@@ -71,7 +78,22 @@ pub enum AppMessage {
         error: UiError,
     },
     RefreshSessionList,
+    ActiveConversationRefreshed {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        snapshot: TimelineSnapshotVm,
+    },
+    ActiveConversationRefreshFailed {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        error: UiError,
+    },
     RefreshTotalUnreadCount,
+    ConnectionTitleStateChanged {
+        state: ConnectionTitleState,
+    },
     RepairChannelSyncRequested {
         channel_id: u64,
         channel_type: i32,
@@ -217,6 +239,11 @@ pub enum AppMessage {
         user_id: u64,
         is_typing: bool,
     },
+    TypingHintExpired {
+        channel_id: u64,
+        channel_type: i32,
+        user_id: u64,
+    },
     TypingSendCompleted {
         is_typing: bool,
     },
@@ -243,6 +270,8 @@ pub enum AppMessage {
     ComposerAttachmentPicked {
         path: Option<String>,
     },
+    ComposerAttachmentSendConfirmed,
+    ComposerAttachmentSendCanceled,
     OpenImagePreview {
         message_id: u64,
         local_path: String,
@@ -259,7 +288,12 @@ pub enum AppMessage {
         file_id: Option<u64>,
         filename: String,
     },
+    ShowTextMenu {
+        message_id: u64,
+        text: String,
+    },
     DismissAttachmentMenu,
+    TextMenuCopy,
     AttachmentMenuOpen,
     AttachmentMenuOpenFolder,
     AttachmentMenuSaveAs,

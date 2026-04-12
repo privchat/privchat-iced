@@ -315,6 +315,30 @@ impl PrivchatSdkBridge {
         Ok(snapshot.map(|s| s.user_id))
     }
 
+    async fn apply_revoke_flag_to_vm(&self, message: &mut MessageVm) -> Result<(), UiError> {
+        if message.is_deleted {
+            return Ok(());
+        }
+        if let Some(extra) = self
+            .sdk
+            .get_message_extra(message.message_id)
+            .await
+            .map_err(map_sdk_error)?
+        {
+            if extra.revoke {
+                message.is_deleted = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_revoke_flags_to_vms(&self, messages: &mut [MessageVm]) -> Result<(), UiError> {
+        for message in messages {
+            self.apply_revoke_flag_to_vm(message).await?;
+        }
+        Ok(())
+    }
+
     async fn load_user_detail(
         &self,
         user_id: u64,
@@ -612,6 +636,18 @@ impl SdkBridge for PrivchatSdkBridge {
         let mut did_entity_repair_sync = false;
         for channel in &channels {
             let mut item = adapter::map_channel_to_session_item(channel);
+            if channel.last_local_message_id > 0 {
+                if let Some(extra) = self
+                    .sdk
+                    .get_message_extra(channel.last_local_message_id)
+                    .await
+                    .map_err(map_sdk_error)?
+                {
+                    if extra.revoke {
+                        item.subtitle = "[消息已撤回]".to_string();
+                    }
+                }
+            }
             if let Some(peer_user_id) = infer_direct_peer_user_id(channel, &item.title, current_uid)
             {
                 let mut user = self.get_or_fetch_user_by_id(peer_user_id).await?;
@@ -1202,12 +1238,14 @@ impl SdkBridge for PrivchatSdkBridge {
             .map_err(map_sdk_error)?;
 
         let unread_marker = adapter::map_unread_marker(channel.as_ref(), extra.as_ref());
-        Ok(adapter::map_snapshot_to_vm(
+        let mut vm = adapter::map_snapshot_to_vm(
             &snapshot,
             current_uid,
             0,
             unread_marker,
-        ))
+        );
+        self.apply_revoke_flags_to_vms(&mut vm.items).await?;
+        Ok(vm)
     }
 
     async fn subscribe_channel(&self, channel_id: u64, channel_type: i32) -> Result<(), UiError> {
@@ -1402,6 +1440,28 @@ impl SdkBridge for PrivchatSdkBridge {
         if !response {
             return Err(UiError::Unknown("撤回失败".to_string()));
         }
+        // Persist revoke state into local SDK storage immediately.
+        // Otherwise UI can briefly flip to "revoked" and then be overwritten by a refresh.
+        let channel_type = self
+            .sdk
+            .get_channel_by_id(channel_id)
+            .await
+            .map_err(map_sdk_error)?
+            .map(|channel| channel.channel_type as i32)
+            .unwrap_or(1);
+        if let Some(message) = self
+            .sdk
+            .list_messages(channel_id, channel_type, 5000, 0)
+            .await
+            .map_err(map_sdk_error)?
+            .into_iter()
+            .find(|message| message.server_message_id == Some(server_message_id))
+        {
+            self.sdk
+                .set_message_revoke(message.message_id, true, None)
+                .await
+                .map_err(map_sdk_error)?;
+        }
         Ok(())
     }
 
@@ -1474,7 +1534,8 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
 
-        let all = adapter::map_history_messages_to_vm(&messages, current_uid, false).items;
+        let mut all = adapter::map_history_messages_to_vm(&messages, current_uid, false).items;
+        self.apply_revoke_flags_to_vms(&mut all).await?;
 
         let split_index = if let Some(before) = before_server_message_id {
             all.iter()
@@ -1504,8 +1565,11 @@ impl SdkBridge for PrivchatSdkBridge {
             .get_message_by_id(message_id)
             .await
             .map_err(map_sdk_error)?;
-
-        Ok(message.map(|stored| adapter::map_stored_message_to_vm(&stored, current_uid, None)))
+        let mut vm = message.map(|stored| adapter::map_stored_message_to_vm(&stored, current_uid, None));
+        if let Some(message) = &mut vm {
+            self.apply_revoke_flag_to_vm(message).await?;
+        }
+        Ok(vm)
     }
 
     async fn mark_read(

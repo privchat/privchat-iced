@@ -50,7 +50,7 @@ pub fn load_app_config() -> anyhow::Result<(String, AppConfig)> {
     let profile = env::var("PRIVCHAT_PROFILE")
         .ok()
         .or_else(|| option_env!("PRIVCHAT_PROFILE").map(String::from))
-        .unwrap_or_else(|| "loan".to_string())
+        .unwrap_or_else(|| "local".to_string())
         .trim()
         .to_string();
 
