@@ -236,7 +236,10 @@ pub fn update(
         }
 
         AppMessage::FriendPresencesLoadFailed { error } => {
-            warn!("friend presence refresh failed: {}", format_ui_error(&error));
+            warn!(
+                "friend presence refresh failed: {}",
+                format_ui_error(&error)
+            );
             Task::none()
         }
 
@@ -513,7 +516,12 @@ pub fn update(
         }
 
         AppMessage::CopyLogsPressed => {
-            let content = state.runtime_logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            let content = state
+                .runtime_logs
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
             match copy_text_to_clipboard(&content) {
                 Ok(()) => {
                     state.settings.logs_feedback = Some("日志已复制到剪贴板".to_string());
@@ -548,7 +556,12 @@ pub fn update(
                 state.settings.logs_feedback = Some("已取消导出".to_string());
                 return Task::none();
             };
-            let content = state.runtime_logs.iter().cloned().collect::<Vec<_>>().join("\n");
+            let content = state
+                .runtime_logs
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
             match fs::write(&path, content) {
                 Ok(()) => {
                     state.settings.logs_feedback = Some(format!("日志已导出: {path}"));
@@ -1322,20 +1335,19 @@ pub fn update(
 
         AppMessage::ComposerInputChanged { text } => {
             if let Some(chat) = &mut state.active_chat {
-                let was_typing = chat.composer.typing_active;
                 chat.composer.draft = text;
                 chat.composer.editor =
                     iced::widget::text_editor::Content::with_text(&chat.composer.draft);
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
-                if was_typing != is_typing {
-                    return schedule_send_typing_task(
-                        bridge,
-                        chat.channel_id,
-                        chat.channel_type,
-                        is_typing,
-                    );
-                }
+                // 输入内容变化时立即上报（有输入 → typing=true，清空 → typing=false）
+                // 服务端有 500ms 限流器控制频率，客户端不做 edge 判断
+                return schedule_send_typing_task(
+                    bridge,
+                    chat.channel_id,
+                    chat.channel_type,
+                    is_typing,
+                );
             }
             Task::none()
         }
@@ -1820,19 +1832,18 @@ pub fn update(
 
         AppMessage::ComposerEdited { action } => {
             if let Some(chat) = &mut state.active_chat {
-                let was_typing = chat.composer.typing_active;
                 chat.composer.editor.perform(action);
                 chat.composer.draft = chat.composer.editor.text();
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
-                if was_typing != is_typing {
-                    return schedule_send_typing_task(
-                        bridge,
-                        chat.channel_id,
-                        chat.channel_type,
-                        is_typing,
-                    );
-                }
+                // 输入内容变化时立即上报（有输入 → typing=true，清空 → typing=false）
+                // 服务端有 500ms 限流器控制频率，客户端不做 edge 判断
+                return schedule_send_typing_task(
+                    bridge,
+                    chat.channel_id,
+                    chat.channel_type,
+                    is_typing,
+                );
             }
             Task::none()
         }
@@ -1902,8 +1913,7 @@ pub fn update(
             };
             warn!(
                 "revoke message failed: server_message_id={} error={}",
-                server_message_id,
-                error_text
+                server_message_id, error_text
             );
             append_runtime_log(state, "WARN", &ui_text);
             state.auth.error = Some(ui_text);
@@ -2777,9 +2787,23 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
     }
     touch_session_preview(state, channel_id, channel_type, &body, now);
 
+    // 顺序执行：先通知对方"输入结束"，再发送消息
+    // 确保对方先看到"正在输入"消失，再收到新消息
     let send_bridge = Arc::clone(bridge);
+    let typing_bridge = Arc::clone(bridge);
     let send_task = Task::perform(
         async move {
+            // 1. 先发送 typing=false，通知对方输入结束
+            if let Err(e) = typing_bridge
+                .send_typing(channel_id, channel_type, false)
+                .await
+            {
+                warn!(
+                    "send_typing(false) before send_message failed: {}",
+                    format_ui_error(&e)
+                );
+            }
+            // 2. 再发送实际消息
             send_bridge
                 .send_text_message(channel_id, channel_type, client_txn_id, body)
                 .await
@@ -2808,10 +2832,8 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             }
         },
     );
-    Task::batch([
-        send_task,
-        schedule_send_typing_task(&bridge, channel_id, channel_type, false),
-    ])
+    // typing=false 已在 send_task 内部顺序发送，不再需要额外 batch
+    send_task
 }
 
 fn attachment_type_body_and_preview(path: &Path) -> (i32, String, String) {
@@ -2831,16 +2853,10 @@ fn attachment_type_body_and_preview(path: &Path) -> (i32, String, String) {
             "[图片]".to_string(),
             "[图片]".to_string(),
         ),
-        "mp4" | "mov" | "mkv" | "avi" | "webm" => (
-            VIDEO_MESSAGE_TYPE,
-            filename,
-            "[视频]".to_string(),
-        ),
-        _ => (
-            FILE_MESSAGE_TYPE,
-            filename,
-            "[文件]".to_string(),
-        ),
+        "mp4" | "mov" | "mkv" | "avi" | "webm" => {
+            (VIDEO_MESSAGE_TYPE, filename, "[视频]".to_string())
+        }
+        _ => (FILE_MESSAGE_TYPE, filename, "[文件]".to_string()),
     }
 }
 
@@ -2923,10 +2939,22 @@ fn handle_send_attachment_path(
     }
     touch_session_preview(state, channel_id, channel_type, &preview, now);
 
+    // 顺序执行：先通知对方"输入结束"，再发送附件消息
     let send_bridge = Arc::clone(bridge);
     let typing_bridge = Arc::clone(bridge);
     let send_task = Task::perform(
         async move {
+            // 1. 先发送 typing=false，通知对方输入结束
+            if let Err(e) = typing_bridge
+                .send_typing(channel_id, channel_type, false)
+                .await
+            {
+                warn!(
+                    "send_typing(false) before send_attachment failed: {}",
+                    format_ui_error(&e)
+                );
+            }
+            // 2. 再发送附件消息
             send_bridge
                 .send_attachment_message(channel_id, channel_type, client_txn_id, file_path)
                 .await
@@ -2955,11 +2983,8 @@ fn handle_send_attachment_path(
             }
         },
     );
-
-    Task::batch([
-        send_task,
-        schedule_send_typing_task(&typing_bridge, channel_id, channel_type, false),
-    ])
+    // typing=false 已在 send_task 内部顺序发送
+    send_task
 }
 
 fn touch_session_preview(
@@ -3711,9 +3736,11 @@ fn handle_composer_paste_pressed(
             }
             if let Some(chat) = &mut state.active_chat {
                 let was_typing = chat.composer.typing_active;
-                chat.composer.editor.perform(iced::widget::text_editor::Action::Edit(
-                    iced::widget::text_editor::Edit::Paste(Arc::new(text)),
-                ));
+                chat.composer
+                    .editor
+                    .perform(iced::widget::text_editor::Action::Edit(
+                        iced::widget::text_editor::Edit::Paste(Arc::new(text)),
+                    ));
                 chat.composer.draft = chat.composer.editor.text();
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
