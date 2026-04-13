@@ -87,11 +87,7 @@ pub fn update(
                     chat.peer_user_id = item.peer_user_id;
                 }
             }
-            if let Some((channel_id, channel_type)) = state
-                .active_chat
-                .as_ref()
-                .map(|chat| (chat.channel_id, chat.channel_type))
-            {
+            if let Some((channel_id, channel_type)) = active_chat_mark_read_target(state) {
                 clear_local_unread_for_channel(state, channel_id, channel_type);
             }
             state.session_list.total_unread_count = state
@@ -926,11 +922,52 @@ pub fn update(
             }
             if let Some(chat) = &mut state.active_chat {
                 chat.timeline.revision = snapshot.revision;
-                chat.timeline.items = snapshot.items;
-                normalize_timeline_items(&mut chat.timeline.items);
                 chat.timeline.oldest_server_message_id = snapshot.oldest_server_message_id;
                 chat.timeline.has_more_before = snapshot.has_more_before;
                 chat.unread_marker = snapshot.unread_marker;
+
+                // 核心修复：在覆盖时间线前，抢救那些还在发送中的本地消息
+                // 1. 提取 pending locals (必须是 is_own 且正在发送中)
+                // 严格基于 send_state 判断，避免误判其他无 server_message_id 的项
+                let pending_locals: Vec<MessageVm> = chat
+                    .timeline
+                    .items
+                    .iter()
+                    .filter(|item| {
+                        item.is_own
+                            && item.client_txn_id.is_some()
+                            && matches!(
+                                item.send_state,
+                                Some(MessageSendStateVm::Queued)
+                                    | Some(MessageSendStateVm::Sending)
+                                    | Some(MessageSendStateVm::Retrying)
+                            )
+                    })
+                    .cloned()
+                    .collect();
+
+                // 2. 应用数据库快照 (这是持久态真相)
+                let mut merged_items = snapshot.items;
+
+                // 3. 将 pending locals 合并回快照中 (瞬时态乐观更新)
+                // 只有当快照中不存在该消息时才追加 (防止 ack 后重复)
+                // 去重锚点：client_txn_id (假设全链路透传)
+                for local in pending_locals {
+                    if let Some(local_txn_id) = local.client_txn_id {
+                        let exists_in_snapshot = merged_items
+                            .iter()
+                            .any(|item| item.client_txn_id == Some(local_txn_id));
+                        if !exists_in_snapshot {
+                            merged_items.push(local);
+                        }
+                    }
+                }
+
+                // 4. 统一排序和重建索引
+                // 必须调用 normalize 以确保顺序正确 (取决于 message_id 排序规则)
+                // 同时也防止 normalize 中有其他清理逻辑
+                normalize_timeline_items(&mut merged_items);
+                chat.timeline.items = merged_items;
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
             }
             let media_items = state
@@ -3406,6 +3443,19 @@ fn clear_local_unread_for_channel(state: &mut AppState, channel_id: u64, channel
     }
 }
 
+/// Keep unread badges stable: only clear unread from a session-list refresh when
+/// user is actively viewing this chat and the viewport is at bottom.
+fn active_chat_mark_read_target(state: &AppState) -> Option<(u64, i32)> {
+    if !matches!(state.route, Route::Chat) {
+        return None;
+    }
+    let chat = state.active_chat.as_ref()?;
+    if !chat.timeline.at_bottom {
+        return None;
+    }
+    Some((chat.channel_id, chat.channel_type))
+}
+
 fn schedule_mark_read_task(
     bridge: &Arc<dyn SdkBridge>,
     channel_id: u64,
@@ -4448,6 +4498,7 @@ mod tests {
             composer: ComposerState::default(),
             unread_marker: UnreadMarkerVm::default(),
             typing_hint: None,
+            typing_user_id: None,
             preview_image_path: None,
             attachment_menu: None,
         });
@@ -4771,6 +4822,45 @@ mod tests {
             Some(TimelineItemKey::Remote {
                 server_message_id: 901
             })
+        );
+    }
+
+    #[test]
+    fn session_list_loaded_does_not_clear_unread_outside_chat_route() {
+        let mut state = base_state();
+        let bridge: Arc<dyn SdkBridge> = Arc::new(StubBridge);
+        state.route = Route::AddFriend;
+        state.session_list.items = vec![crate::presentation::vm::SessionListItemVm {
+            channel_id: 100,
+            channel_type: 2,
+            peer_user_id: Some(42),
+            title: "demo".to_string(),
+            subtitle: "msg".to_string(),
+            unread_count: 3,
+            last_msg_timestamp: 0,
+        }];
+        state.session_list.total_unread_count = 3;
+
+        let _ = update(
+            &mut state,
+            AppMessage::SessionListLoaded {
+                items: vec![crate::presentation::vm::SessionListItemVm {
+                    channel_id: 100,
+                    channel_type: 2,
+                    peer_user_id: Some(42),
+                    title: "demo".to_string(),
+                    subtitle: "msg".to_string(),
+                    unread_count: 3,
+                    last_msg_timestamp: 0,
+                }],
+            },
+            &bridge,
+        );
+
+        assert_eq!(state.session_list.total_unread_count, 3);
+        assert_eq!(
+            state.session_list.items.first().map(|it| it.unread_count),
+            Some(3)
         );
     }
 
