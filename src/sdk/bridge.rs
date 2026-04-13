@@ -120,6 +120,17 @@ fn infer_direct_peer_user_id(
     .find(|user_id| Some(*user_id) != current_uid)
 }
 
+fn infer_direct_peer_from_members(
+    members: &[privchat_sdk::StoredChannelMember],
+    current_uid: Option<u64>,
+) -> Option<u64> {
+    members
+        .iter()
+        .filter(|member| !member.is_deleted)
+        .map(|member| member.member_uid)
+        .find(|uid| Some(*uid) != current_uid)
+}
+
 const TEXT_MESSAGE_TYPE: i32 = ContentMessageType::Text as i32;
 const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
@@ -648,8 +659,58 @@ impl SdkBridge for PrivchatSdkBridge {
                     }
                 }
             }
-            if let Some(peer_user_id) = infer_direct_peer_user_id(channel, &item.title, current_uid)
-            {
+            let mut peer_user_id =
+                infer_direct_peer_user_id(channel, &item.title, current_uid);
+            if peer_user_id.is_none() && channel.channel_type == 1 {
+                match self
+                    .sdk
+                    .list_channel_members(channel.channel_id, channel.channel_type, 64, 0)
+                    .await
+                {
+                    Ok(members) => {
+                        peer_user_id = infer_direct_peer_from_members(&members, current_uid);
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "infer peer by channel members failed: channel_id={} channel_type={} error={}",
+                            channel.channel_id,
+                            channel.channel_type,
+                            error
+                        );
+                    }
+                }
+            }
+            if peer_user_id.is_none() && channel.channel_type == 1 {
+                match self
+                    .sdk
+                    .query_timeline_snapshot(channel.channel_id, channel.channel_type, 64, 0)
+                    .await
+                {
+                    Ok(snapshot) => {
+                        peer_user_id = snapshot
+                            .messages
+                            .iter()
+                            .map(|message| message.from_uid)
+                            .find(|uid| *uid > 0 && Some(*uid) != current_uid);
+                        tracing::info!(
+                            "presence.infer_peer_from_snapshot: channel_id={} channel_type={} resolved_peer_user_id={:?}",
+                            channel.channel_id,
+                            channel.channel_type,
+                            peer_user_id
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            "infer peer by timeline snapshot failed: channel_id={} channel_type={} error={}",
+                            channel.channel_id,
+                            channel.channel_type,
+                            error
+                        );
+                    }
+                }
+            }
+
+            if let Some(peer_user_id) = peer_user_id {
                 let mut user = self.get_or_fetch_user_by_id(peer_user_id).await?;
                 if user.is_none() && !did_entity_repair_sync {
                     did_entity_repair_sync = true;
@@ -674,6 +735,13 @@ impl SdkBridge for PrivchatSdkBridge {
                 }
                 item.peer_user_id = Some(peer_user_id);
             }
+            tracing::info!(
+                "presence.session_item: channel_id={} channel_type={} title={} peer_user_id={:?}",
+                item.channel_id,
+                item.channel_type,
+                item.title,
+                item.peer_user_id
+            );
             items.push(item);
         }
 
@@ -858,12 +926,13 @@ impl SdkBridge for PrivchatSdkBridge {
     }
 
     async fn batch_get_presence(&self, user_ids: Vec<u64>) -> Result<Vec<PresenceVm>, UiError> {
+        tracing::info!("presence.batch_get_presence.request: user_ids={:?}", user_ids);
         let statuses = self
             .sdk
             .batch_get_presence(user_ids)
             .await
             .map_err(map_sdk_error)?;
-        Ok(statuses
+        let mapped = statuses
             .into_iter()
             .map(|status| PresenceVm {
                 user_id: status.user_id,
@@ -871,7 +940,19 @@ impl SdkBridge for PrivchatSdkBridge {
                 last_seen_at: status.last_seen_at,
                 device_count: status.device_count,
             })
-            .collect())
+            .collect::<Vec<_>>();
+        tracing::info!(
+            "presence.batch_get_presence.response: items={}",
+            mapped
+                .iter()
+                .map(|item| format!(
+                    "{}:{}:{}:{}",
+                    item.user_id, item.is_online, item.last_seen_at, item.device_count
+                ))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        Ok(mapped)
     }
 
     async fn accept_friend_request(&self, from_user_id: u64) -> Result<u64, UiError> {
@@ -1251,10 +1332,21 @@ impl SdkBridge for PrivchatSdkBridge {
     async fn subscribe_channel(&self, channel_id: u64, channel_type: i32) -> Result<(), UiError> {
         let channel_type = u8::try_from(channel_type)
             .map_err(|_| UiError::Unknown(format!("invalid channel_type: {channel_type}")))?;
+        tracing::info!(
+            "presence.bridge_subscribe_channel.request: channel_id={} channel_type={}",
+            channel_id,
+            channel_type
+        );
         self.sdk
             .subscribe_channel(channel_id, channel_type, None)
             .await
-            .map_err(map_sdk_error)
+            .map_err(map_sdk_error)?;
+        tracing::info!(
+            "presence.bridge_subscribe_channel.ok: channel_id={} channel_type={}",
+            channel_id,
+            channel_type
+        );
+        Ok(())
     }
 
     async fn send_text_message(

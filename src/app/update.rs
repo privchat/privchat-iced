@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -19,6 +18,7 @@ use crate::app::state::{
     AppState, ChatScreenState, ComposerState, PendingAttachmentState, RuntimeMessageIndex,
     TimelineState,
 };
+use crate::audio;
 use crate::presentation::vm::{
     AddFriendSelectionVm, ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey,
     TimelinePatchVm, UnreadMarkerVm,
@@ -83,6 +83,8 @@ pub fn update(
                     if !item.title.trim().is_empty() {
                         chat.title = item.title.clone();
                     }
+                    // Always overwrite to avoid carrying stale peer from previous conversation.
+                    chat.peer_user_id = item.peer_user_id;
                 }
             }
             if let Some((channel_id, channel_type)) = state
@@ -101,6 +103,7 @@ pub fn update(
             let mut tasks = vec![
                 schedule_total_unread_refresh(bridge),
                 schedule_presence_channel_subscriptions(state, bridge),
+                schedule_session_peer_presence_refresh(state, bridge),
             ];
             if state.session_list.refresh_pending {
                 tasks.push(schedule_session_list_refresh(state, bridge));
@@ -145,6 +148,19 @@ pub fn update(
                 tasks.push(task);
             }
             Task::batch(tasks)
+        }
+
+        AppMessage::RefreshPresenceSnapshot => {
+            if state.auth.user_id.is_none() {
+                return Task::none();
+            }
+            match state.route {
+                Route::AddFriend => schedule_friend_presence_refresh(state, bridge),
+                Route::Chat | Route::SessionList => {
+                    schedule_session_peer_presence_refresh(state, bridge)
+                }
+                _ => Task::none(),
+            }
         }
 
         AppMessage::RepairChannelSyncRequested {
@@ -219,7 +235,10 @@ pub fn update(
             Task::none()
         }
 
-        AppMessage::FriendPresencesLoadFailed { error: _ } => Task::none(),
+        AppMessage::FriendPresencesLoadFailed { error } => {
+            warn!("friend presence refresh failed: {}", format_ui_error(&error));
+            Task::none()
+        }
 
         AppMessage::AddFriendFriendsLoadFailed { error } => {
             state.add_friend.contacts_error = Some(format_ui_error(&error));
@@ -373,7 +392,11 @@ pub fn update(
             }
             state.add_friend.feedback = None;
             state.add_friend.contacts_error = None;
-            schedule_add_friend_refresh(bridge)
+            let mut tasks = vec![schedule_add_friend_refresh(bridge)];
+            if !state.add_friend.friends.is_empty() {
+                tasks.push(schedule_friend_presence_refresh(state, bridge));
+            }
+            Task::batch(tasks)
         }
 
         AppMessage::OpenAddFriendSearchWindow => {
@@ -716,6 +739,16 @@ pub fn update(
                 chat.timeline.has_more_before = snapshot.has_more_before;
                 chat.unread_marker = snapshot.unread_marker;
                 chat.runtime_index.rebuild_from_items(&chat.timeline.items);
+                if chat.peer_user_id.is_none() {
+                    chat.peer_user_id =
+                        infer_peer_user_id_from_timeline(&chat.timeline.items, state.auth.user_id);
+                    tracing::info!(
+                        "presence.infer_peer_from_timeline: channel_id={} channel_type={} peer_user_id={:?}",
+                        chat.channel_id,
+                        chat.channel_type,
+                        chat.peer_user_id
+                    );
+                }
             }
             let media_items = state
                 .active_chat
@@ -736,6 +769,28 @@ pub fn update(
                 channel_type,
                 last_read_pts,
             ));
+            if let Some(chat) = state.active_chat.as_ref() {
+                if let Some(peer_user_id) = chat.peer_user_id {
+                    let presence_bridge = Arc::clone(bridge);
+                    tasks.push(Task::perform(
+                        async move { presence_bridge.batch_get_presence(vec![peer_user_id]).await },
+                        move |result| match result {
+                            Ok(mut items) => AppMessage::ChatPresenceLoaded {
+                                channel_id,
+                                channel_type,
+                                open_token,
+                                presence: items.pop(),
+                            },
+                            Err(error) => AppMessage::ChatPresenceLoadFailed {
+                                channel_id,
+                                channel_type,
+                                open_token,
+                                error,
+                            },
+                        },
+                    ));
+                }
+            }
             Task::batch(tasks)
         }
 
@@ -749,8 +804,25 @@ pub fn update(
                 return Task::none();
             }
             if let Some(presence) = presence {
+                tracing::info!(
+                    "presence.chat_loaded: channel_id={} channel_type={} open_token={} user_id={} is_online={} last_seen_at={} device_count={}",
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    presence.user_id,
+                    presence.is_online,
+                    presence.last_seen_at,
+                    presence.device_count
+                );
                 state.presences.insert(presence.user_id, presence);
                 apply_presence_to_friend_items(state);
+            } else {
+                tracing::warn!(
+                    "presence.chat_loaded: channel_id={} channel_type={} open_token={} empty result",
+                    channel_id,
+                    channel_type,
+                    open_token
+                );
             }
             Task::none()
         }
@@ -759,11 +831,18 @@ pub fn update(
             channel_id,
             channel_type,
             open_token,
-            error: _,
+            error,
         } => {
             if !pass_dual_guard(state, channel_id, channel_type, open_token) {
                 return Task::none();
             }
+            tracing::warn!(
+                "presence.chat_load_failed: channel_id={} channel_type={} open_token={} error={}",
+                channel_id,
+                channel_type,
+                open_token,
+                format_ui_error(&error)
+            );
             Task::none()
         }
 
@@ -825,6 +904,13 @@ pub fn update(
         } => handle_conversation_selected(state, bridge, channel_id, channel_type),
 
         AppMessage::PresenceChanged { presence } => {
+            tracing::info!(
+                "presence.event_changed: user_id={} is_online={} last_seen_at={} device_count={}",
+                presence.user_id,
+                presence.is_online,
+                presence.last_seen_at,
+                presence.device_count
+            );
             state.presences.insert(presence.user_id, presence.clone());
             apply_presence_to_friend_items(state);
             Task::none()
@@ -1993,6 +2079,41 @@ fn handle_conversation_selected(
     let open_token = state.allocate_open_token();
     let resolved_title = resolve_chat_title(state, channel_id, channel_type);
     let peer_user_id = resolve_chat_peer_user_id(state, channel_id, channel_type);
+    if let Some(user_id) = peer_user_id {
+        match state.presences.get(&user_id) {
+            Some(presence) => tracing::info!(
+                "presence.local_cache_hit: channel_id={} channel_type={} open_token={} user_id={} is_online={} last_seen_at={} device_count={}",
+                channel_id,
+                channel_type,
+                open_token,
+                user_id,
+                presence.is_online,
+                presence.last_seen_at,
+                presence.device_count
+            ),
+            None => tracing::info!(
+                "presence.local_cache_miss: channel_id={} channel_type={} open_token={} user_id={}",
+                channel_id,
+                channel_type,
+                open_token,
+                user_id
+            ),
+        }
+    } else {
+        tracing::warn!(
+            "presence.peer_user_id_missing: channel_id={} channel_type={} open_token={}",
+            channel_id,
+            channel_type,
+            open_token
+        );
+    }
+    tracing::info!(
+        "presence.select_conversation: channel_id={} channel_type={} open_token={} peer_user_id={:?}",
+        channel_id,
+        channel_type,
+        open_token,
+        peer_user_id
+    );
     state.route = Route::Chat;
     state.active_chat = Some(ChatScreenState {
         channel_id,
@@ -2041,11 +2162,35 @@ fn handle_conversation_selected(
                     .subscribe_channel(channel_id, channel_type)
                     .await
             },
-            |_| AppMessage::Noop,
+            move |result| {
+                match result {
+                    Ok(()) => tracing::info!(
+                        "presence.subscribe_channel.ok: channel_id={} channel_type={} open_token={}",
+                        channel_id,
+                        channel_type,
+                        open_token
+                    ),
+                    Err(error) => tracing::warn!(
+                        "presence.subscribe_channel.failed: channel_id={} channel_type={} open_token={} error={}",
+                        channel_id,
+                        channel_type,
+                        open_token,
+                        format_ui_error(&error)
+                    ),
+                }
+                AppMessage::Noop
+            },
         ),
     ];
 
     if let Some(peer_user_id) = peer_user_id {
+        tracing::info!(
+            "presence.rpc_fetch.request: channel_id={} channel_type={} open_token={} user_id={}",
+            channel_id,
+            channel_type,
+            open_token,
+            peer_user_id
+        );
         tasks.push(Task::perform(
             async move { presence_bridge.batch_get_presence(vec![peer_user_id]).await },
             move |result| match result {
@@ -2148,6 +2293,21 @@ fn resolve_chat_peer_user_id(state: &AppState, channel_id: u64, channel_type: i3
     }
 }
 
+fn infer_peer_user_id_from_timeline(
+    items: &[MessageVm],
+    current_user_id: Option<u64>,
+) -> Option<u64> {
+    items.iter().find_map(|item| {
+        if item.from_uid == 0 {
+            return None;
+        }
+        if Some(item.from_uid) == current_user_id {
+            return None;
+        }
+        Some(item.from_uid)
+    })
+}
+
 fn apply_presence_to_friend_items(state: &mut AppState) {
     for item in &mut state.add_friend.friends {
         item.is_online = state
@@ -2167,6 +2327,33 @@ fn schedule_friend_presence_refresh(
         .friends
         .iter()
         .map(|item| item.user_id)
+        .collect::<Vec<_>>();
+    if user_ids.is_empty() {
+        return Task::none();
+    }
+
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.batch_get_presence(user_ids).await },
+        |result| match result {
+            Ok(items) => AppMessage::FriendPresencesLoaded { items },
+            Err(error) => AppMessage::FriendPresencesLoadFailed { error },
+        },
+    )
+}
+
+fn schedule_session_peer_presence_refresh(
+    state: &AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    let mut seen = HashSet::new();
+    let user_ids = state
+        .session_list
+        .items
+        .iter()
+        .take(30)
+        .filter_map(|item| item.peer_user_id)
+        .filter(|user_id| seen.insert(*user_id))
         .collect::<Vec<_>>();
     if user_ids.is_empty() {
         return Task::none();
@@ -2203,7 +2390,22 @@ fn schedule_presence_channel_subscriptions(
             let bridge = Arc::clone(bridge);
             Task::perform(
                 async move { bridge.subscribe_channel(channel_id, channel_type).await },
-                |_| AppMessage::Noop,
+                move |result| {
+                    match result {
+                        Ok(()) => tracing::info!(
+                            "presence.schedule_subscribe.ok: channel_id={} channel_type={}",
+                            channel_id,
+                            channel_type
+                        ),
+                        Err(error) => tracing::warn!(
+                            "presence.schedule_subscribe.failed: channel_id={} channel_type={} error={}",
+                            channel_id,
+                            channel_type,
+                            format_ui_error(&error)
+                        ),
+                    }
+                    AppMessage::Noop
+                },
             )
         })
         .collect::<Vec<_>>();
@@ -2625,7 +2827,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
     );
     Task::batch([
         send_task,
-        schedule_send_typing_task(bridge, channel_id, channel_type, false),
+        schedule_send_typing_task(&bridge, channel_id, channel_type, false),
     ])
 }
 
@@ -2734,13 +2936,15 @@ fn handle_send_attachment_path(
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
         chat.composer.emoji_picker_open = false;
+        chat.composer.typing_active = false;
     }
     touch_session_preview(state, channel_id, channel_type, &preview, now);
 
-    let bridge = Arc::clone(bridge);
-    Task::perform(
+    let send_bridge = Arc::clone(bridge);
+    let typing_bridge = Arc::clone(bridge);
+    let send_task = Task::perform(
         async move {
-            bridge
+            send_bridge
                 .send_attachment_message(channel_id, channel_type, client_txn_id, file_path)
                 .await
         },
@@ -2767,7 +2971,12 @@ fn handle_send_attachment_path(
                 }
             }
         },
-    )
+    );
+
+    Task::batch([
+        send_task,
+        schedule_send_typing_task(&typing_bridge, channel_id, channel_type, false),
+    ])
 }
 
 fn touch_session_preview(
@@ -3942,8 +4151,7 @@ fn maybe_play_message_notification_sound(
         }
     }
 
-    print!("\x07");
-    let _ = std::io::stdout().flush();
+    audio::play_message_notification_sound();
 }
 
 #[cfg(test)]

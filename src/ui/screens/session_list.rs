@@ -3,6 +3,7 @@ use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
 use crate::app::state::{AppState, SessionListItemState};
+use crate::presentation::vm::PresenceVm;
 use crate::ui::icons::{self, Icon};
 
 const C_PANEL_BG: Color = Color::from_rgb8(0x2B, 0x2E, 0x34);
@@ -48,12 +49,50 @@ pub fn view(
             let selected = active_chat.is_some_and(|(channel_id, channel_type)| {
                 channel_id == item.channel_id && channel_type == item.channel_type
             });
-            let is_online = item
-                .peer_user_id
-                .and_then(|user_id| state.presences.get(&user_id))
-                .map(|presence| presence.is_online)
-                .unwrap_or(false);
-            list = list.push(conversation_item(item, selected, panel_width, is_online));
+            let presence_user_id = if selected {
+                let active_chat_peer_user_id = state
+                    .active_chat
+                    .as_ref()
+                    .and_then(|chat| {
+                        (chat.channel_id == item.channel_id && chat.channel_type == item.channel_type)
+                            .then_some(chat.peer_user_id)
+                            .flatten()
+                    });
+                let active_peer_presence = active_chat_peer_user_id
+                    .and_then(|user_id| state.presences.get(&user_id));
+                let session_peer_presence = item
+                    .peer_user_id
+                    .and_then(|user_id| state.presences.get(&user_id));
+                if active_peer_presence.is_some_and(|p| p.is_online) {
+                    active_chat_peer_user_id
+                } else if session_peer_presence.is_some_and(|p| p.is_online) {
+                    item.peer_user_id
+                } else if active_peer_presence.is_some() {
+                    active_chat_peer_user_id
+                } else if session_peer_presence.is_some() {
+                    item.peer_user_id
+                } else {
+                    active_chat_peer_user_id.or(item.peer_user_id)
+                }
+            } else {
+                item.peer_user_id
+            };
+            let presence = presence_user_id.and_then(|user_id| state.presences.get(&user_id));
+            let friend_online_fallback = presence_user_id.and_then(|user_id| {
+                state
+                    .add_friend
+                    .friends
+                    .iter()
+                    .find(|friend| friend.user_id == user_id)
+                    .map(|friend| friend.is_online)
+            });
+            list = list.push(conversation_item(
+                item,
+                selected,
+                panel_width,
+                presence,
+                friend_online_fallback,
+            ));
         }
     }
 
@@ -107,38 +146,52 @@ fn search_bar() -> Element<'static, AppMessage> {
         .into()
 }
 
-fn conversation_item(
-    item: &SessionListItemState,
+fn conversation_item<'a>(
+    item: &'a SessionListItemState,
     selected: bool,
     panel_width: f32,
-    is_online: bool,
-) -> Element<'_, AppMessage> {
+    presence: Option<&'a PresenceVm>,
+    friend_online_fallback: Option<bool>,
+) -> Element<'a, AppMessage> {
     let (title_max_chars, subtitle_max_chars) = text_budget_from_panel_width(panel_width);
     let display_title = truncate_single_line(&item.title, title_max_chars);
     let display_subtitle = truncate_single_line(&item.subtitle, subtitle_max_chars);
+    let status = resolve_presence_status(presence, friend_online_fallback);
+    let is_online = status.as_ref().map(|value| value.is_online).unwrap_or(false);
+
+    let mut text_col = column![
+        row![
+            container(
+                text(display_title)
+                    .size(14)
+                    .wrapping(iced::widget::text::Wrapping::None)
+                    .color(Color::from_rgb8(0xEA, 0xEE, 0xF4))
+            )
+            .width(Length::Fill),
+            container(session_item_meta(item))
+                .width(Length::Fixed(52.0))
+                .align_x(alignment::Horizontal::Right),
+        ],
+        text(display_subtitle)
+            .size(12)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .color(Color::from_rgb8(0xA4, 0xAB, 0xB4)),
+    ]
+    .spacing(5)
+    .width(Length::Fill);
+
+    if let Some(status) = &status {
+        text_col = text_col.push(
+            text(status.label.clone())
+                .size(11)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .color(status.color),
+        );
+    }
 
     let row = row![
         avatar_with_badge(item.unread_count, is_online),
-        column![
-            row![
-                container(
-                    text(display_title)
-                        .size(14)
-                        .wrapping(iced::widget::text::Wrapping::None)
-                        .color(Color::from_rgb8(0xEA, 0xEE, 0xF4))
-                )
-                .width(Length::Fill),
-                container(session_item_meta(item))
-                    .width(Length::Fixed(52.0))
-                    .align_x(alignment::Horizontal::Right),
-            ],
-            text(display_subtitle)
-                .size(12)
-                .wrapping(iced::widget::text::Wrapping::None)
-                .color(Color::from_rgb8(0xA4, 0xAB, 0xB4)),
-        ]
-        .spacing(5)
-        .width(Length::Fill),
+        text_col,
     ]
     .spacing(9)
     .align_y(alignment::Vertical::Center);
@@ -319,6 +372,66 @@ fn avatar_with_badge(unread_count: u32, is_online: bool) -> Element<'static, App
     .width(Length::Fixed(48.0))
     .height(Length::Fixed(44.0))
     .into()
+}
+
+struct PresenceDisplay {
+    label: String,
+    color: Color,
+    is_online: bool,
+}
+
+fn resolve_presence_status(
+    presence: Option<&PresenceVm>,
+    friend_online_fallback: Option<bool>,
+) -> Option<PresenceDisplay> {
+    if let Some(presence) = presence {
+        if presence.is_online {
+            return Some(PresenceDisplay {
+                label: "在线".to_string(),
+                color: C_ONLINE,
+                is_online: true,
+            });
+        }
+        let last_seen_at = presence.last_seen_at;
+        if last_seen_at <= 0 {
+            return Some(PresenceDisplay {
+                label: "很久没有上线".to_string(),
+                color: Color::from_rgb8(0x9A, 0xA1, 0xAB),
+                is_online: false,
+            });
+        }
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let elapsed_ms = now_ms.saturating_sub(last_seen_at);
+        let day_ms: i64 = 24 * 60 * 60 * 1000;
+        let label = if elapsed_ms < day_ms {
+            "不久前在线"
+        } else if elapsed_ms < 7 * day_ms {
+            "1天前在线"
+        } else if elapsed_ms < 30 * day_ms {
+            "7天前在线"
+        } else if elapsed_ms < 90 * day_ms {
+            "30天前在线"
+        } else {
+            "很久没有上线"
+        };
+
+        return Some(PresenceDisplay {
+            label: label.to_string(),
+            color: Color::from_rgb8(0x9A, 0xA1, 0xAB),
+            is_online: false,
+        });
+    }
+
+    if friend_online_fallback == Some(true) {
+        return Some(PresenceDisplay {
+            label: "在线".to_string(),
+            color: C_ONLINE,
+            is_online: true,
+        });
+    }
+
+    None
 }
 
 fn format_last_msg_time(last_msg_timestamp: i64) -> Result<String, &'static str> {

@@ -2,9 +2,10 @@ use iced::widget::{button, column, container, row, scrollable, text, text_input}
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
-use crate::app::state::AddFriendState;
+use crate::app::state::{AddFriendState, AppState};
 use crate::presentation::vm::{
-    AddFriendSelectionVm, FriendListItemVm, FriendRequestItemVm, GroupListItemVm, SearchUserVm,
+    AddFriendSelectionVm, FriendListItemVm, FriendRequestItemVm, GroupListItemVm, PresenceVm,
+    SearchUserVm,
 };
 use crate::ui::icons::{self, Icon};
 
@@ -21,27 +22,28 @@ const C_POPUP_CARD_BG: Color = Color::from_rgb8(0x2D, 0x31, 0x38);
 const C_POPUP_SUCCESS: Color = Color::from_rgb8(0x1D, 0xC4, 0x72);
 const C_ONLINE: Color = Color::from_rgb8(0x22, 0xC5, 0x5E);
 
-pub fn panel_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
-    let query = state.search_input.trim().to_lowercase();
+pub fn panel_view<'a>(state: &'a AppState) -> Element<'a, AppMessage> {
+    let add_friend = &state.add_friend;
+    let query = add_friend.search_input.trim().to_lowercase();
 
-    let requests = state
+    let requests = add_friend
         .requests
         .iter()
         .filter(|item| matches_query(&query, &item.title, &item.subtitle))
         .collect::<Vec<_>>();
-    let groups = state
+    let groups = add_friend
         .groups
         .iter()
         .filter(|item| matches_query(&query, &item.title, &item.subtitle))
         .collect::<Vec<_>>();
-    let friends = state
+    let friends = add_friend
         .friends
         .iter()
         .filter(|item| matches_query(&query, &item.title, &item.subtitle))
         .collect::<Vec<_>>();
 
     let mut list = column![];
-    if let Some(error) = &state.contacts_error {
+    if let Some(error) = &add_friend.contacts_error {
         list = list.push(
             container(
                 text(error)
@@ -54,17 +56,17 @@ pub fn panel_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
 
     list = list.push(section_header(
         "新好友消息",
-        state.new_friends_expanded,
+        add_friend.new_friends_expanded,
         Some(requests.len() as u32),
         AppMessage::ToggleNewFriendsSection,
     ));
 
-    if state.new_friends_expanded {
+    if add_friend.new_friends_expanded {
         if requests.is_empty() {
             list = list.push(empty_tip("暂无新的好友申请"));
         } else {
             for item in requests {
-                let selected = state.selected_panel_item
+                let selected = add_friend.selected_panel_item
                     == Some(AddFriendSelectionVm::Request(item.from_user_id));
                 list = list.push(friend_request_item(item, selected));
             }
@@ -73,18 +75,18 @@ pub fn panel_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
 
     list = list.push(section_header(
         "群列表",
-        state.groups_expanded,
+        add_friend.groups_expanded,
         Some(groups.len() as u32),
         AppMessage::ToggleGroupSection,
     ));
 
-    if state.groups_expanded {
+    if add_friend.groups_expanded {
         if groups.is_empty() {
             list = list.push(empty_tip("暂无群组"));
         } else {
             for item in groups {
                 let selected =
-                    state.selected_panel_item == Some(AddFriendSelectionVm::Group(item.group_id));
+                    add_friend.selected_panel_item == Some(AddFriendSelectionVm::Group(item.group_id));
                 list = list.push(group_item(item, selected));
             }
         }
@@ -92,26 +94,27 @@ pub fn panel_view<'a>(state: &'a AddFriendState) -> Element<'a, AppMessage> {
 
     list = list.push(section_header(
         "好友列表",
-        state.friends_expanded,
+        add_friend.friends_expanded,
         Some(friends.len() as u32),
         AppMessage::ToggleFriendSection,
     ));
 
-    if state.friends_expanded {
+    if add_friend.friends_expanded {
         list = list.push(section_divider());
         if friends.is_empty() {
             list = list.push(empty_tip("暂无匹配好友"));
         } else {
             for item in friends {
                 let selected =
-                    state.selected_panel_item == Some(AddFriendSelectionVm::Friend(item.user_id));
-                list = list.push(friend_item(item, selected));
+                    add_friend.selected_panel_item == Some(AddFriendSelectionVm::Friend(item.user_id));
+                let presence = state.presences.get(&item.user_id);
+                list = list.push(friend_item(item, selected, presence));
             }
         }
     }
 
     column![
-        search_bar(&state.search_input),
+        search_bar(&add_friend.search_input),
         scrollable(list.spacing(8).padding([0, 10]))
             .width(Length::Fill)
             .height(Length::Fill)
@@ -604,9 +607,19 @@ fn group_item(item: &GroupListItemVm, selected: bool) -> Element<'static, AppMes
     .into()
 }
 
-fn friend_item(item: &FriendListItemVm, selected: bool) -> Element<'static, AppMessage> {
+fn friend_item(
+    item: &FriendListItemVm,
+    selected: bool,
+    presence: Option<&PresenceVm>,
+) -> Element<'static, AppMessage> {
     let title = truncate_single_line(&item.title, 24);
-    let subtitle = truncate_single_line(&item.subtitle, 30);
+    let (status_label, status_color) = presence_status_bucket(presence);
+    let subtitle = if item.subtitle.trim().is_empty() {
+        status_label
+    } else {
+        format!("{} · {}", item.subtitle.trim(), status_label)
+    };
+    let subtitle = truncate_single_line(&subtitle, 36);
     let selection = AddFriendSelectionVm::Friend(item.user_id);
 
     button(
@@ -621,7 +634,7 @@ fn friend_item(item: &FriendListItemVm, selected: bool) -> Element<'static, AppM
                     text(subtitle)
                         .size(12)
                         .wrapping(iced::widget::text::Wrapping::None)
-                        .color(C_TEXT_SECONDARY),
+                        .color(status_color),
                 ]
                 .spacing(4)
                 .width(Length::Fill),
@@ -638,6 +651,36 @@ fn friend_item(item: &FriendListItemVm, selected: bool) -> Element<'static, AppM
     .style(move |_theme, status| list_item_style(selected, status))
     .on_press(AppMessage::AddFriendPanelSelected { item: selection })
     .into()
+}
+
+fn presence_status_bucket(presence: Option<&PresenceVm>) -> (String, Color) {
+    let Some(presence) = presence else {
+        return ("很久没有上线".to_string(), C_TEXT_SECONDARY);
+    };
+    if presence.is_online {
+        return ("在线".to_string(), C_ONLINE);
+    }
+    let last_seen_at = presence.last_seen_at;
+    if last_seen_at <= 0 {
+        return ("很久没有上线".to_string(), C_TEXT_SECONDARY);
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let elapsed_ms = now_ms.saturating_sub(last_seen_at);
+    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    let label = if elapsed_ms < day_ms {
+        "不久前在线"
+    } else if elapsed_ms < 7 * day_ms {
+        "1天前在线"
+    } else if elapsed_ms < 30 * day_ms {
+        "7天前在线"
+    } else if elapsed_ms < 90 * day_ms {
+        "30天前在线"
+    } else {
+        "很久没有上线"
+    };
+
+    (label.to_string(), C_TEXT_SECONDARY)
 }
 
 fn list_item_style(selected: bool, status: button::Status) -> button::Style {

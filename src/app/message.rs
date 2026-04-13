@@ -78,6 +78,7 @@ pub enum AppMessage {
         error: UiError,
     },
     RefreshSessionList,
+    RefreshPresenceSnapshot,
     ActiveConversationRefreshed {
         channel_id: u64,
         channel_type: i32,

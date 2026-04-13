@@ -1,4 +1,5 @@
 mod app;
+mod audio;
 mod config;
 mod presentation;
 mod sdk;

@@ -1,8 +1,10 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use iced::event;
 use iced::keyboard::{self, key, Key};
 use iced::mouse;
+use iced::time;
 use iced::window;
 use iced::Subscription;
 
@@ -72,6 +74,19 @@ pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscripti
         event::listen_with(map_global_event),
         window::close_requests().map(|window_id| AppMessage::WindowCloseRequested { window_id }),
     ];
+
+    let should_poll_presence = state.auth.user_id.is_some()
+        && matches!(
+            state.route,
+            crate::app::route::Route::SessionList
+                | crate::app::route::Route::Chat
+                | crate::app::route::Route::AddFriend
+        );
+    if should_poll_presence {
+        subscriptions.push(time::every(Duration::from_secs(8)).map(|_| {
+            AppMessage::RefreshPresenceSnapshot
+        }));
+    }
     if let Some(context) = map_context_from_state(state) {
         subscriptions.push(
             bridge

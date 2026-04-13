@@ -255,7 +255,7 @@ fn presence_status_text<'a>(
             text(status_label).size(12).color(status_color).into()
         }
         (None, Some(typing_label)) => text(typing_label).size(12).color(C_STATUS_ONLINE).into(),
-        (None, None) => container(text("")).into(),
+        (None, None) => text("").size(12).color(C_STATUS_OFFLINE).into(),
     }
 }
 

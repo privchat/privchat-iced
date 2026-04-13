@@ -41,9 +41,33 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     let detail: Element<'_, AppMessage> = match state.route {
         Route::Chat => {
             if let Some(chat_state) = &state.active_chat {
-                let active_presence = chat_state
+                let session_peer_user_id = state
+                    .session_list
+                    .items
+                    .iter()
+                    .find(|item| {
+                        item.channel_id == chat_state.channel_id
+                            && item.channel_type == chat_state.channel_type
+                    })
+                    .and_then(|item| item.peer_user_id);
+                let chat_peer_presence = chat_state
                     .peer_user_id
                     .and_then(|user_id| state.presences.get(&user_id));
+                let session_peer_presence = session_peer_user_id
+                    .and_then(|user_id| state.presences.get(&user_id));
+                let resolved_peer_user_id = if chat_peer_presence.is_some_and(|p| p.is_online) {
+                    chat_state.peer_user_id
+                } else if session_peer_presence.is_some_and(|p| p.is_online) {
+                    session_peer_user_id
+                } else if chat_peer_presence.is_some() {
+                    chat_state.peer_user_id
+                } else if session_peer_presence.is_some() {
+                    session_peer_user_id
+                } else {
+                    chat_state.peer_user_id.or(session_peer_user_id)
+                };
+                let active_presence =
+                    resolved_peer_user_id.and_then(|user_id| state.presences.get(&user_id));
                 chat::view(
                     chat_state,
                     active_title,
@@ -63,7 +87,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     };
 
     let middle_panel: Element<'_, AppMessage> = match state.route {
-        Route::AddFriend => add_friend::panel_view(&state.add_friend),
+        Route::AddFriend => add_friend::panel_view(state),
         _ => session_list::view(state, active_chat, state.layout.session_list_width),
     };
 
