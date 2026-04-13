@@ -270,6 +270,8 @@ pub struct ChatScreenState {
     pub composer: ComposerState,
     pub unread_marker: UnreadMarkerVm,
     pub typing_hint: Option<String>,
+    /// 记录当前正在输入的用户 ID，用于在收到该用户消息时精确清除气泡
+    pub typing_user_id: Option<u64>,
     pub preview_image_path: Option<String>,
     pub attachment_menu: Option<AttachmentMenuState>,
 }

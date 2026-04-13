@@ -245,6 +245,12 @@ pub enum AppMessage {
         channel_type: i32,
         user_id: u64,
     },
+    /// 消息到达时清除匹配的 typing 状态
+    ClearTypingIfMatch {
+        channel_id: u64,
+        channel_type: i32,
+        user_id: u64,
+    },
     TypingSendCompleted {
         is_typing: bool,
     },

@@ -990,6 +990,8 @@ pub fn update(
                     } else {
                         None
                     };
+                    // 记录正在输入的用户 ID
+                    chat.typing_user_id = if is_typing { Some(user_id) } else { None };
                 }
             }
             if is_typing {
@@ -1007,6 +1009,24 @@ pub fn update(
             if let Some(chat) = &mut state.active_chat {
                 if chat.channel_id == channel_id && chat.channel_type == channel_type {
                     chat.typing_hint = None;
+                    chat.typing_user_id = None;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ClearTypingIfMatch {
+            channel_id,
+            channel_type,
+            user_id,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id
+                    && chat.channel_type == channel_type
+                    && chat.typing_user_id == Some(user_id)
+                {
+                    chat.typing_hint = None;
+                    chat.typing_user_id = None;
                 }
             }
             Task::none()
@@ -2180,6 +2200,7 @@ fn handle_conversation_selected(
         composer: ComposerState::default(),
         unread_marker: UnreadMarkerVm::default(),
         typing_hint: None,
+        typing_user_id: None,
         preview_image_path: None,
         attachment_menu: None,
     });
@@ -3496,6 +3517,12 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
             remote.client_txn_id = Some(client_txn_id);
             remote.key = TimelineItemKey::Remote { server_message_id };
 
+            // 消息强收敛：收到远端消息时，如果发送者正在输入，则清除其气泡
+            if chat.typing_user_id == Some(remote.from_uid) {
+                chat.typing_hint = None;
+                chat.typing_user_id = None;
+            }
+
             if let Some(index) = find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
             {
                 chat.timeline.items[index] = remote;
@@ -3517,6 +3544,12 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
                 return false;
             };
             remote.key = TimelineItemKey::Remote { server_message_id };
+
+            // 消息强收敛：收到远端消息时，如果发送者正在输入，则清除其气泡
+            if chat.typing_user_id == Some(remote.from_uid) {
+                chat.typing_hint = None;
+                chat.typing_user_id = None;
+            }
 
             if let Some(index) =
                 find_item_index_by_server_message_id(&chat.timeline.items, server_message_id)
