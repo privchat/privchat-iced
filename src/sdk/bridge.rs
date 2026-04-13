@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -75,6 +75,49 @@ fn choose_display_name(
         .or_else(|| non_empty(nickname))
         .or_else(|| non_empty(username))
         .unwrap_or(fallback)
+}
+
+fn normalize_display_key(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_lowercase())
+    }
+}
+
+fn build_friend_title_lookup(
+    friends: &[StoredFriend],
+    current_uid: Option<u64>,
+) -> HashMap<String, u64> {
+    let mut grouped: HashMap<String, Vec<u64>> = HashMap::new();
+    for friend in friends {
+        if Some(friend.user_id) == current_uid {
+            continue;
+        }
+        let display_name = choose_display_name(
+            friend.alias.as_deref(),
+            friend.nickname.as_deref(),
+            friend.username.as_deref(),
+            String::new(),
+        );
+        if let Some(key) = normalize_display_key(&display_name) {
+            grouped.entry(key).or_default().push(friend.user_id);
+        }
+    }
+
+    grouped
+        .into_iter()
+        .filter_map(|(key, mut ids)| {
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() == 1 {
+                Some((key, ids[0]))
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn field(label: &str, value: impl Into<String>) -> AddFriendDetailFieldVm {
@@ -643,6 +686,14 @@ impl SdkBridge for PrivchatSdkBridge {
             unread_snapshot
         );
 
+        let friend_title_lookup = match self.sdk.list_friends(5000, 0).await {
+            Ok(friends) => build_friend_title_lookup(&friends, current_uid),
+            Err(error) => {
+                tracing::warn!("presence.friend_lookup_load_failed: {}", error);
+                HashMap::new()
+            }
+        };
+
         let mut items = Vec::with_capacity(channels.len());
         let mut did_entity_repair_sync = false;
         for channel in &channels {
@@ -707,6 +758,18 @@ impl SdkBridge for PrivchatSdkBridge {
                             error
                         );
                     }
+                }
+            }
+            if peer_user_id.is_none() && channel.channel_type == 1 {
+                if let Some(key) = normalize_display_key(&item.title) {
+                    peer_user_id = friend_title_lookup.get(&key).copied();
+                    tracing::info!(
+                        "presence.infer_peer_from_friend_title: channel_id={} channel_type={} title={} resolved_peer_user_id={:?}",
+                        channel.channel_id,
+                        channel.channel_type,
+                        item.title,
+                        peer_user_id
+                    );
                 }
             }
 

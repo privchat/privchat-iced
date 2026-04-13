@@ -343,7 +343,7 @@ impl AppState {
             overlay: OverlayState::default(),
             switch_account: SwitchAccountState::default(),
             runtime_logs: VecDeque::new(),
-            connection_title_state: ConnectionTitleState::Disconnected,
+            connection_title_state: ConnectionTitleState::Connecting,
             session_epoch: 0,
             media_downloads_inflight: HashSet::new(),
             next_open_token: 1,

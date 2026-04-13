@@ -132,12 +132,10 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
             info!("sdk_event: connection_state_changed {:?} -> {:?}", from, to);
             let state = match to {
                 ConnectionState::Authenticated => ConnectionTitleState::Connected,
-                ConnectionState::Connected | ConnectionState::LoggedIn => {
+                ConnectionState::Connected | ConnectionState::LoggedIn | ConnectionState::New => {
                     ConnectionTitleState::Connecting
                 }
-                ConnectionState::New | ConnectionState::Shutdown => {
-                    ConnectionTitleState::Disconnected
-                }
+                ConnectionState::Shutdown => ConnectionTitleState::Disconnected,
             };
             AppMessage::ConnectionTitleStateChanged { state }
         }

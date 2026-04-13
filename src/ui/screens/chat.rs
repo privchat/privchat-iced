@@ -269,17 +269,18 @@ fn presence_status_bucket(presence: &PresenceVm) -> (String, Color) {
         return ("很久没有上线".to_string(), C_STATUS_OFFLINE);
     }
 
-    let now_ms = chrono::Utc::now().timestamp_millis();
-    let elapsed_ms = now_ms.saturating_sub(last_seen_at);
-    let day_ms: i64 = 24 * 60 * 60 * 1000;
+    // last_seen_at is Unix seconds from the server; compare in seconds
+    let now = chrono::Utc::now().timestamp();
+    let elapsed = now.saturating_sub(last_seen_at);
+    let day: i64 = 24 * 60 * 60;
 
-    let label = if elapsed_ms < day_ms {
+    let label = if elapsed < day {
         "不久前在线"
-    } else if elapsed_ms < 7 * day_ms {
+    } else if elapsed < 7 * day {
         "1天前在线"
-    } else if elapsed_ms < 30 * day_ms {
+    } else if elapsed < 30 * day {
         "7天前在线"
-    } else if elapsed_ms < 90 * day_ms {
+    } else if elapsed < 90 * day {
         "30天前在线"
     } else {
         "很久没有上线"

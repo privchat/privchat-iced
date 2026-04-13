@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use iced::{window, Element, Font, Size, Subscription, Task};
+use tracing_subscriber::EnvFilter;
 
 use app::message::AppMessage;
 use app::route::Route;
@@ -198,7 +199,17 @@ fn main_window_settings() -> window::Settings {
 }
 
 fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    // 配置日志过滤器：默认过滤掉高频低价值日志
+    // 可通过 RUST_LOG 环境变量覆盖
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("info")
+            .add_directive("refinery_core=warn".parse().unwrap()) // 数据库迁移检查
+            .add_directive("msgtrans::transport=warn".parse().unwrap()) // 传输层收发消息
+            .add_directive("privchat_iced::sdk::bridge=warn".parse().unwrap()) // presence 轮询
+    });
+
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+
     app::reporting::install_report_sink(Arc::new(app::reporting::TracingReportSink));
 
     let (profile, config) = config::load_app_config()?;

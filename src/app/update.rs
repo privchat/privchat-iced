@@ -271,7 +271,28 @@ pub fn update(
         AppMessage::RefreshTotalUnreadCount => schedule_total_unread_refresh(bridge),
 
         AppMessage::ConnectionTitleStateChanged { state: next_state } => {
+            let was_connected = matches!(
+                state.connection_title_state,
+                crate::app::message::ConnectionTitleState::Connected
+            );
             state.connection_title_state = next_state;
+            // When connection drops (was Connected/Authenticated, now reconnecting),
+            // mark all online presences as offline so we don't show stale "在线".
+            // Use current time as last_seen_at so they show "刚刚在线".
+            if was_connected
+                && matches!(
+                    next_state,
+                    crate::app::message::ConnectionTitleState::Connecting
+                )
+            {
+                let now = chrono::Utc::now().timestamp();
+                for presence in state.presences.values_mut() {
+                    if presence.is_online {
+                        presence.is_online = false;
+                        presence.last_seen_at = now;
+                    }
+                }
+            }
             Task::none()
         }
 
@@ -768,6 +789,29 @@ pub fn update(
                 channel_id,
                 channel_type,
                 last_read_pts,
+            ));
+            // subscribe_channel requires network; run after timeline is loaded from local DB
+            let subscribe_bridge = Arc::clone(bridge);
+            tasks.push(Task::perform(
+                async move {
+                    subscribe_bridge
+                        .subscribe_channel(channel_id, channel_type)
+                        .await
+                },
+                move |result| {
+                    match result {
+                        Ok(()) => tracing::info!(
+                            "presence.subscribe_channel.ok: channel_id={} channel_type={} open_token={}",
+                            channel_id, channel_type, open_token
+                        ),
+                        Err(error) => tracing::warn!(
+                            "presence.subscribe_channel.failed: channel_id={} channel_type={} open_token={} error={}",
+                            channel_id, channel_type, open_token,
+                            format_ui_error(&error)
+                        ),
+                    }
+                    AppMessage::Noop
+                },
             ));
             if let Some(chat) = state.active_chat.as_ref() {
                 if let Some(peer_user_id) = chat.peer_user_id {
@@ -2131,86 +2175,30 @@ fn handle_conversation_selected(
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
+    // open_timeline reads from local SQLite — must complete first, unblocked by network calls.
+    // subscribe_channel and presence fetch both require network; they run after ConversationOpened.
     let timeline_bridge = Arc::clone(bridge);
-    let subscribe_bridge = Arc::clone(bridge);
-    let presence_bridge = Arc::clone(bridge);
-    let mut tasks = vec![
-        Task::perform(
-            async move {
-                timeline_bridge
-                    .open_timeline(channel_id, channel_type)
-                    .await
+    Task::perform(
+        async move {
+            timeline_bridge
+                .open_timeline(channel_id, channel_type)
+                .await
+        },
+        move |result| match result {
+            Ok(snapshot) => AppMessage::ConversationOpened {
+                channel_id,
+                channel_type,
+                open_token,
+                snapshot,
             },
-            move |result| match result {
-                Ok(snapshot) => AppMessage::ConversationOpened {
-                    channel_id,
-                    channel_type,
-                    open_token,
-                    snapshot,
-                },
-                Err(error) => AppMessage::ConversationOpenFailed {
-                    channel_id,
-                    channel_type,
-                    open_token,
-                    error,
-                },
+            Err(error) => AppMessage::ConversationOpenFailed {
+                channel_id,
+                channel_type,
+                open_token,
+                error,
             },
-        ),
-        Task::perform(
-            async move {
-                subscribe_bridge
-                    .subscribe_channel(channel_id, channel_type)
-                    .await
-            },
-            move |result| {
-                match result {
-                    Ok(()) => tracing::info!(
-                        "presence.subscribe_channel.ok: channel_id={} channel_type={} open_token={}",
-                        channel_id,
-                        channel_type,
-                        open_token
-                    ),
-                    Err(error) => tracing::warn!(
-                        "presence.subscribe_channel.failed: channel_id={} channel_type={} open_token={} error={}",
-                        channel_id,
-                        channel_type,
-                        open_token,
-                        format_ui_error(&error)
-                    ),
-                }
-                AppMessage::Noop
-            },
-        ),
-    ];
-
-    if let Some(peer_user_id) = peer_user_id {
-        tracing::info!(
-            "presence.rpc_fetch.request: channel_id={} channel_type={} open_token={} user_id={}",
-            channel_id,
-            channel_type,
-            open_token,
-            peer_user_id
-        );
-        tasks.push(Task::perform(
-            async move { presence_bridge.batch_get_presence(vec![peer_user_id]).await },
-            move |result| match result {
-                Ok(mut items) => AppMessage::ChatPresenceLoaded {
-                    channel_id,
-                    channel_type,
-                    open_token,
-                    presence: items.pop(),
-                },
-                Err(error) => AppMessage::ChatPresenceLoadFailed {
-                    channel_id,
-                    channel_type,
-                    open_token,
-                    error,
-                },
-            },
-        ));
-    }
-
-    Task::batch(tasks)
+        },
+    )
 }
 
 fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> String {
@@ -2285,12 +2273,7 @@ fn resolve_chat_peer_user_id(state: &AppState, channel_id: u64, channel_type: i3
             return item.peer_user_id;
         }
     }
-
-    match state.add_friend.selected_panel_item {
-        Some(AddFriendSelectionVm::Friend(user_id))
-        | Some(AddFriendSelectionVm::Request(user_id)) => Some(user_id),
-        _ => None,
-    }
+    None
 }
 
 fn infer_peer_user_id_from_timeline(

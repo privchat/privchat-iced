@@ -49,34 +49,7 @@ pub fn view(
             let selected = active_chat.is_some_and(|(channel_id, channel_type)| {
                 channel_id == item.channel_id && channel_type == item.channel_type
             });
-            let presence_user_id = if selected {
-                let active_chat_peer_user_id = state
-                    .active_chat
-                    .as_ref()
-                    .and_then(|chat| {
-                        (chat.channel_id == item.channel_id && chat.channel_type == item.channel_type)
-                            .then_some(chat.peer_user_id)
-                            .flatten()
-                    });
-                let active_peer_presence = active_chat_peer_user_id
-                    .and_then(|user_id| state.presences.get(&user_id));
-                let session_peer_presence = item
-                    .peer_user_id
-                    .and_then(|user_id| state.presences.get(&user_id));
-                if active_peer_presence.is_some_and(|p| p.is_online) {
-                    active_chat_peer_user_id
-                } else if session_peer_presence.is_some_and(|p| p.is_online) {
-                    item.peer_user_id
-                } else if active_peer_presence.is_some() {
-                    active_chat_peer_user_id
-                } else if session_peer_presence.is_some() {
-                    item.peer_user_id
-                } else {
-                    active_chat_peer_user_id.or(item.peer_user_id)
-                }
-            } else {
-                item.peer_user_id
-            };
+            let presence_user_id = item.peer_user_id;
             let presence = presence_user_id.and_then(|user_id| state.presences.get(&user_id));
             let friend_online_fallback = presence_user_id.and_then(|user_id| {
                 state
@@ -401,16 +374,17 @@ fn resolve_presence_status(
             });
         }
 
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let elapsed_ms = now_ms.saturating_sub(last_seen_at);
-        let day_ms: i64 = 24 * 60 * 60 * 1000;
-        let label = if elapsed_ms < day_ms {
+        // last_seen_at is Unix seconds from the server; compare in seconds
+        let now = chrono::Utc::now().timestamp();
+        let elapsed = now.saturating_sub(last_seen_at);
+        let day: i64 = 24 * 60 * 60;
+        let label = if elapsed < day {
             "不久前在线"
-        } else if elapsed_ms < 7 * day_ms {
+        } else if elapsed < 7 * day {
             "1天前在线"
-        } else if elapsed_ms < 30 * day_ms {
+        } else if elapsed < 30 * day {
             "7天前在线"
-        } else if elapsed_ms < 90 * day_ms {
+        } else if elapsed < 90 * day {
             "30天前在线"
         } else {
             "很久没有上线"
