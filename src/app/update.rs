@@ -1572,6 +1572,7 @@ pub fn update(
 
         AppMessage::OpenAttachment {
             message_id,
+            created_at,
             local_path,
             file_id,
             filename,
@@ -1607,6 +1608,7 @@ pub fn update(
                         None,
                         uid,
                         message_id,
+                        created_at,
                     )
                     .await?;
                     open_with_system(&path)?;
@@ -1618,6 +1620,7 @@ pub fn update(
 
         AppMessage::ShowAttachmentMenu {
             message_id,
+            created_at,
             local_path,
             file_id,
             filename,
@@ -1625,6 +1628,7 @@ pub fn update(
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
+                    created_at,
                     local_path,
                     file_id,
                     filename,
@@ -1638,6 +1642,7 @@ pub fn update(
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
+                    created_at: 0,
                     local_path: None,
                     file_id: None,
                     filename: String::new(),
@@ -1706,6 +1711,7 @@ pub fn update(
                     let bridge = Arc::clone(bridge);
                     let filename = menu.filename.clone();
                     let message_id = menu.message_id;
+                    let created_at = menu.created_at;
                     let uid = state.auth.user_id.unwrap_or(0);
 
                     Task::perform(
@@ -1717,7 +1723,8 @@ pub fn update(
                                 Some(filename),
                                 None,
                                 uid,
-                                menu.message_id,
+                                message_id,
+                                created_at,
                             )
                             .await?;
                             open_with_system(&path)?;
@@ -1767,6 +1774,7 @@ pub fn update(
                     let bridge = Arc::clone(bridge);
                     let filename = menu.filename.clone();
                     let message_id = menu.message_id;
+                    let created_at = menu.created_at;
                     let uid = state.auth.user_id.unwrap_or(0);
 
                     Task::perform(
@@ -1779,6 +1787,7 @@ pub fn update(
                                 None,
                                 uid,
                                 message_id,
+                                created_at,
                             )
                             .await?;
                             let parent = Path::new(&path)
@@ -1806,6 +1815,7 @@ pub fn update(
             match menu {
                 Some(menu) => {
                     let message_id = menu.message_id;
+                    let created_at = menu.created_at;
                     let local_path = menu.local_path;
                     let file_id = menu.file_id;
                     let filename = menu.filename.clone();
@@ -1819,6 +1829,7 @@ pub fn update(
                         },
                         move |save_path| AppMessage::AttachmentSaveAsSelected {
                             message_id,
+                            created_at,
                             local_path,
                             file_id,
                             filename,
@@ -1832,6 +1843,7 @@ pub fn update(
 
         AppMessage::AttachmentSaveAsSelected {
             message_id,
+            created_at,
             local_path,
             file_id,
             filename,
@@ -1873,6 +1885,7 @@ pub fn update(
                             Some(path),
                             uid,
                             message_id,
+                            created_at,
                         )
                         .await?;
                         Ok(saved)
@@ -4177,6 +4190,7 @@ async fn ensure_attachment_local_path(
     save_to: Option<String>,
     uid: u64,
     message_id: u64,
+    created_at_ms: i64,
 ) -> Result<String, crate::presentation::vm::UiError> {
     // 1. 检查本地缓存
     if let Some(path) = local_path {
@@ -4222,11 +4236,13 @@ async fn ensure_attachment_local_path(
     } else {
         // 否则统一保存到 Spec 定义的 message_id 目录下
         // 路径：files/{yyyymm}/{message_id}/{filename}
-        let yyyymm = chrono::Utc::now().format("%Y%m");
-        let message_dir =
-            crate::app::paths::get_message_media_dir(uid, message_id, &yyyymm.to_string());
-
-        std::fs::create_dir_all(&message_dir).map_err(|error| {
+        let message_dir = privchat_sdk::media_store::ensure_attachment_dir(
+            &media_data_root(),
+            uid,
+            message_id as i64,
+            created_at_ms,
+        )
+        .map_err(|error| {
             crate::presentation::vm::UiError::Unknown(format!("create message dir failed: {error}"))
         })?;
 

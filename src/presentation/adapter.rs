@@ -182,12 +182,6 @@ fn infer_type_from_filename_like(text: &str) -> Option<i32> {
     Some(FILE_MESSAGE_TYPE)
 }
 
-fn yyyymm_from_timestamp_ms(timestamp_ms: i64) -> String {
-    chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms)
-        .map(|dt| dt.format("%Y%m").to_string())
-        .unwrap_or_else(|| chrono::Utc::now().format("%Y%m").to_string())
-}
-
 fn sdk_storage_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(value) = std::env::var("PRIVCHAT_DATA_DIR")
@@ -246,57 +240,39 @@ fn resolve_local_media_path(
     }
 
     let filename = guess_filename(body, metadata);
-    let yyyymm = yyyymm_from_timestamp_ms(created_at);
-    let message_dir_name = message_id.to_string();
 
     for root in sdk_storage_roots() {
         let users_root = root.join("users");
         let mut uid_candidates = Vec::new();
         if let Some(uid) = current_uid {
-            uid_candidates.push(uid.to_string());
+            uid_candidates.push(uid);
         }
         if let Ok(entries) = std::fs::read_dir(&users_root) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if let Some(name) = path.file_name().and_then(|v| v.to_str()) {
-                        if !uid_candidates.iter().any(|existing| existing == name) {
-                            uid_candidates.push(name.to_string());
+                    if let Some(uid_val) = path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .and_then(|v| v.parse::<u64>().ok())
+                    {
+                        if !uid_candidates.contains(&uid_val) {
+                            uid_candidates.push(uid_val);
                         }
                     }
                 }
             }
         }
 
-        for uid in uid_candidates {
-            let uid_val = uid.parse::<u64>().unwrap_or(0);
-            let message_dir =
-                crate::app::paths::get_message_media_dir(uid_val, message_id, &yyyymm);
-
-            if let Some(filename) = filename.as_ref() {
-                let candidate = message_dir.join(filename);
-                if candidate.exists() {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
-            }
-
-            // Fallback: filename may be absent in payload; pick first non-meta file.
-            if let Ok(entries) = std::fs::read_dir(&message_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if !path.is_file() {
-                        continue;
-                    }
-                    let name = path
-                        .file_name()
-                        .and_then(|v| v.to_str())
-                        .unwrap_or_default()
-                        .to_ascii_lowercase();
-                    if name == "meta.json" || name.is_empty() {
-                        continue;
-                    }
-                    return Some(path.to_string_lossy().to_string());
-                }
+        for uid_val in uid_candidates {
+            if let Some(path) = privchat_sdk::media_store::resolve_attachment_path(
+                &root,
+                uid_val,
+                message_id as i64,
+                created_at,
+                filename.as_deref(),
+            ) {
+                return Some(path.to_string_lossy().to_string());
             }
         }
     }

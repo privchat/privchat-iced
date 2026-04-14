@@ -285,12 +285,14 @@ pub enum AppMessage {
     },
     OpenAttachment {
         message_id: u64,
+        created_at: i64,
         local_path: Option<String>,
         file_id: Option<u64>,
         filename: Option<String>,
     },
     ShowAttachmentMenu {
         message_id: u64,
+        created_at: i64,
         local_path: Option<String>,
         file_id: Option<u64>,
         filename: String,
@@ -312,6 +314,7 @@ pub enum AppMessage {
     },
     AttachmentSaveAsSelected {
         message_id: u64,
+        created_at: i64,
         local_path: Option<String>,
         file_id: Option<u64>,
         filename: String,

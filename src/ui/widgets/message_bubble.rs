@@ -129,6 +129,7 @@ pub fn view(
                 .style(navless_button_style)
                 .on_press(AppMessage::OpenAttachment {
                     message_id: message.message_id,
+                    created_at: message.created_at,
                     local_path: message.media_local_path.clone(),
                     file_id: message.media_file_id,
                     filename: Some(message.body.clone()),
@@ -167,6 +168,7 @@ pub fn view(
             .style(retry_button_style)
             .on_press(AppMessage::OpenAttachment {
                 message_id: message.message_id,
+                created_at: message.created_at,
                 local_path: message.media_local_path.clone(),
                 file_id: message.media_file_id,
                 filename: Some(message.body.clone()),
@@ -193,6 +195,7 @@ pub fn view(
             .style(navless_button_style)
             .on_press(AppMessage::OpenAttachment {
                 message_id: message.message_id,
+                created_at: message.created_at,
                 local_path: message.media_local_path.clone(),
                 file_id: message.media_file_id,
                 filename: Some(message.body.clone()),
@@ -292,6 +295,7 @@ pub fn view(
         mouse_area(container_row)
             .on_right_press(AppMessage::ShowAttachmentMenu {
                 message_id: message.message_id,
+                created_at: message.created_at,
                 local_path: message.media_local_path.clone(),
                 file_id: message.media_file_id,
                 filename: message.body.clone(),

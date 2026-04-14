@@ -279,6 +279,7 @@ pub struct ChatScreenState {
 #[derive(Debug, Clone)]
 pub struct AttachmentMenuState {
     pub message_id: u64,
+    pub created_at: i64,
     pub local_path: Option<String>,
     pub file_id: Option<u64>,
     pub filename: String,
