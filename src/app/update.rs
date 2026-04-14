@@ -52,6 +52,7 @@ pub fn update(
         "EVENT",
         &truncate_log_line(&format!("{message:?}"), 240),
     );
+    // NOTE: Read Gate v1 - active_read_channel_id is controlled explicitly by enter/leave.
 
     match message {
         AppMessage::Noop => Task::none(),
@@ -68,6 +69,8 @@ pub fn update(
                 state.route = Route::Login;
                 state.auth.is_submitting = false;
                 state.switch_account.add_account_login_mode = false;
+                // Ensure read gate is cleared on login failure / logout
+                leave_reading_conversation(state);
             }
             Task::none()
         }
@@ -87,9 +90,10 @@ pub fn update(
                     chat.peer_user_id = item.peer_user_id;
                 }
             }
-            if let Some((channel_id, channel_type)) = active_chat_mark_read_target(state) {
-                clear_local_unread_for_channel(state, channel_id, channel_type);
-            }
+            // Removed stale active_chat clearing logic from SessionListLoaded.
+            // Session list refresh should only update the list and total count.
+            // Unread clearing is strictly handled by the reading gate (ConversationOpened / ViewportChanged)
+            // to prevent clearing unreads for conversations the user is not actively viewing.
             state.session_list.total_unread_count = state
                 .session_list
                 .items
@@ -386,11 +390,9 @@ pub fn update(
 
         AppMessage::OpenSessionListPage => {
             state.overlay.settings_menu_open = false;
-            state.route = if state.active_chat.is_some() {
-                Route::Chat
-            } else {
-                Route::SessionList
-            };
+            // 用户回到会话列表时，明确退出“会话阅读态”，避免继续自动已读。
+            leave_reading_conversation(state);
+            state.route = Route::SessionList;
             Task::none()
         }
 
@@ -406,6 +408,7 @@ pub fn update(
 
         AppMessage::OpenAddFriendPage => {
             state.overlay.settings_menu_open = false;
+            leave_reading_conversation(state);
             state.route = Route::AddFriend;
             if state.auth.user_id.is_none() {
                 return Task::none();
@@ -461,6 +464,7 @@ pub fn update(
 
         AppMessage::SettingsMenuOpenSettings => {
             state.overlay.settings_menu_open = false;
+            leave_reading_conversation(state);
             state.route = Route::Settings;
             Task::none()
         }
@@ -477,6 +481,7 @@ pub fn update(
 
         AppMessage::SettingsMenuSwitchAccount => {
             state.overlay.settings_menu_open = false;
+            leave_reading_conversation(state);
             state.switch_account.loading = true;
             state.switch_account.switching_uid = None;
             state.switch_account.error = None;
@@ -636,6 +641,7 @@ pub fn update(
             // (emitted during the in-flight switch_to_local_account task) land
             // on empty state and produce no harmful mutations.
             state.active_chat = None;
+            leave_reading_conversation(state);
             state.session_list.items.clear();
             state.session_list.total_unread_count = 0;
             state.session_list.is_loading = false;
@@ -761,6 +767,19 @@ pub fn update(
             if !pass_dual_guard(state, channel_id, channel_type, open_token) {
                 return Task::none();
             }
+
+            // Read Gate v1: Zombie Clear Defense.
+            // If the user navigated away (e.g., back to list) before this async task completed,
+            // active_read_channel_id will no longer match. We must NOT clear unread or activate context.
+            if state.active_read_channel_id != Some(channel_id) {
+                tracing::warn!(
+                    "read_gate.zombie_clear_blocked: channel_id={} active_read_channel_id={:?}",
+                    channel_id,
+                    state.active_read_channel_id
+                );
+                return Task::none();
+            }
+
             if let Some(chat) = &mut state.active_chat {
                 chat.timeline.revision = snapshot.revision;
                 chat.timeline.items = snapshot.items;
@@ -786,14 +805,19 @@ pub fn update(
                 .map(|chat| chat.timeline.items.clone())
                 .unwrap_or_default();
             let media_tasks = schedule_thumbnail_downloads_for_items(state, &media_items, bridge);
+            let mut tasks = media_tasks;
+
+            // Read Gate v1: Entering a conversation activates the read context
+            enter_reading_conversation(state, channel_id);
+
             clear_local_unread_for_channel(state, channel_id, channel_type);
             let last_read_pts = state
                 .active_chat
                 .as_ref()
                 .and_then(|chat| latest_read_pts(&chat.timeline.items))
                 .unwrap_or(0);
-            let mut tasks = media_tasks;
-            tasks.push(schedule_mark_read_task(
+            tasks.push(maybe_auto_mark_read(
+                state,
                 bridge,
                 channel_id,
                 channel_type,
@@ -2226,6 +2250,7 @@ fn handle_conversation_selected(
         peer_user_id
     );
     state.route = Route::Chat;
+    state.active_read_channel_id = Some(channel_id);
     state.active_chat = Some(ChatScreenState {
         channel_id,
         channel_type,
@@ -2481,6 +2506,7 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     // are actually received.
     state.session_epoch = state.session_epoch.wrapping_add(1);
     state.presences.clear();
+    state.active_read_channel_id = None;
     state.route = Route::SessionList;
 }
 
@@ -2506,6 +2532,7 @@ fn apply_logout(state: &mut AppState) {
     state.add_friend.search_results.clear();
     state.add_friend.feedback = None;
     state.presences.clear();
+    state.active_read_channel_id = None;
     state.auth.is_submitting = false;
     state.auth.error = None;
     state.auth.password.clear();
@@ -3412,8 +3439,13 @@ fn handle_viewport_changed(
     }
 
     let last_read_pts = latest_read_pts(&chat.timeline.items).unwrap_or(0);
-    clear_local_unread_for_channel(state, channel_id, channel_type);
-    schedule_mark_read_task(bridge, channel_id, channel_type, last_read_pts)
+
+    // Read Gate v1: Strictly bind unread clearing to the active reading context
+    if state.active_read_channel_id == Some(channel_id) {
+        clear_local_unread_for_channel(state, channel_id, channel_type);
+        return maybe_auto_mark_read(state, bridge, channel_id, channel_type, last_read_pts);
+    }
+    Task::none()
 }
 
 fn clear_local_unread_for_channel(state: &mut AppState, channel_id: u64, channel_type: i32) {
@@ -3443,17 +3475,31 @@ fn clear_local_unread_for_channel(state: &mut AppState, channel_id: u64, channel
     }
 }
 
-/// Keep unread badges stable: only clear unread from a session-list refresh when
-/// user is actively viewing this chat and the viewport is at bottom.
-fn active_chat_mark_read_target(state: &AppState) -> Option<(u64, i32)> {
-    if !matches!(state.route, Route::Chat) {
-        return None;
+/// Read Gate v1 API
+
+/// 进入会话阅读态：显式激活自动已读上下文
+fn enter_reading_conversation(state: &mut AppState, channel_id: u64) {
+    state.active_read_channel_id = Some(channel_id);
+}
+
+/// 离开会话阅读态：显式失活自动已读上下文
+fn leave_reading_conversation(state: &mut AppState) {
+    state.active_read_channel_id = None;
+}
+
+/// 自动已读统一门禁：只有当前激活的会话才允许推进 read cursor
+/// 如果 channel_id 不匹配 active_read_channel_id，直接静默拦截。
+fn maybe_auto_mark_read(
+    state: &AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    channel_id: u64,
+    channel_type: i32,
+    last_read_pts: u64,
+) -> Task<AppMessage> {
+    if state.active_read_channel_id != Some(channel_id) {
+        return Task::none();
     }
-    let chat = state.active_chat.as_ref()?;
-    if !chat.timeline.at_bottom {
-        return None;
-    }
-    Some((chat.channel_id, chat.channel_type))
+    schedule_mark_read_task(bridge, channel_id, channel_type, last_read_pts)
 }
 
 fn schedule_mark_read_task(
@@ -4487,6 +4533,7 @@ mod tests {
     fn base_state() -> AppState {
         let mut state = AppState::new();
         state.route = Route::Chat;
+        state.active_read_channel_id = Some(100);
         state.active_chat = Some(ChatScreenState {
             channel_id: 100,
             channel_type: 2,
@@ -4862,6 +4909,18 @@ mod tests {
             state.session_list.items.first().map(|it| it.unread_count),
             Some(3)
         );
+    }
+
+    #[test]
+    fn leaving_chat_page_clears_active_read_context() {
+        let mut state = base_state();
+        let bridge: Arc<dyn SdkBridge> = Arc::new(StubBridge);
+        state.active_read_channel_id = Some(100);
+
+        let _ = update(&mut state, AppMessage::OpenSessionListPage, &bridge);
+
+        assert_eq!(state.route, Route::SessionList);
+        assert_eq!(state.active_read_channel_id, None);
     }
 
     #[test]
