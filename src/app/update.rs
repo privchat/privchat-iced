@@ -1571,7 +1571,7 @@ pub fn update(
         }
 
         AppMessage::OpenAttachment {
-            message_id: _,
+            message_id,
             local_path,
             file_id,
             filename,
@@ -1595,11 +1595,20 @@ pub fn update(
                 });
             };
             let bridge = Arc::clone(bridge);
+            let uid = state.auth.user_id.unwrap_or(0);
+
             Task::perform(
                 async move {
                     let url = bridge.get_file_url(file_id).await?;
-                    let path =
-                        ensure_attachment_local_path(None, Some(url), filename, None).await?;
+                    let path = ensure_attachment_local_path(
+                        None,
+                        Some(url),
+                        filename,
+                        None,
+                        uid,
+                        message_id,
+                    )
+                    .await?;
                     open_with_system(&path)?;
                     Ok(path)
                 },
@@ -1695,13 +1704,22 @@ pub fn update(
                         });
                     };
                     let bridge = Arc::clone(bridge);
-                    let filename = menu.filename;
+                    let filename = menu.filename.clone();
+                    let message_id = menu.message_id;
+                    let uid = state.auth.user_id.unwrap_or(0);
+
                     Task::perform(
                         async move {
                             let url = bridge.get_file_url(file_id).await?;
-                            let path =
-                                ensure_attachment_local_path(None, Some(url), Some(filename), None)
-                                    .await?;
+                            let path = ensure_attachment_local_path(
+                                None,
+                                Some(url),
+                                Some(filename),
+                                None,
+                                uid,
+                                menu.message_id,
+                            )
+                            .await?;
                             open_with_system(&path)?;
                             Ok(path)
                         },
@@ -1747,13 +1765,22 @@ pub fn update(
                         });
                     };
                     let bridge = Arc::clone(bridge);
-                    let filename = menu.filename;
+                    let filename = menu.filename.clone();
+                    let message_id = menu.message_id;
+                    let uid = state.auth.user_id.unwrap_or(0);
+
                     Task::perform(
                         async move {
                             let url = bridge.get_file_url(file_id).await?;
-                            let path =
-                                ensure_attachment_local_path(None, Some(url), Some(filename), None)
-                                    .await?;
+                            let path = ensure_attachment_local_path(
+                                None,
+                                Some(url),
+                                Some(filename),
+                                None,
+                                uid,
+                                message_id,
+                            )
+                            .await?;
                             let parent = Path::new(&path)
                                 .parent()
                                 .map(|p| p.to_string_lossy().to_string())
@@ -1804,7 +1831,7 @@ pub fn update(
         }
 
         AppMessage::AttachmentSaveAsSelected {
-            message_id: _,
+            message_id,
             local_path,
             file_id,
             filename,
@@ -1834,6 +1861,8 @@ pub fn update(
                     });
                 };
                 let bridge = Arc::clone(bridge);
+                let uid = state.auth.user_id.unwrap_or(0);
+
                 Task::perform(
                     async move {
                         let url = bridge.get_file_url(file_id).await?;
@@ -1842,6 +1871,8 @@ pub fn update(
                             Some(url),
                             Some(filename),
                             Some(path),
+                            uid,
+                            message_id,
                         )
                         .await?;
                         Ok(saved)
@@ -4144,13 +4175,17 @@ async fn ensure_attachment_local_path(
     remote_url: Option<String>,
     filename: Option<String>,
     save_to: Option<String>,
+    uid: u64,
+    message_id: u64,
 ) -> Result<String, crate::presentation::vm::UiError> {
+    // 1. 检查本地缓存
     if let Some(path) = local_path {
         let target = Path::new(&path);
         if target.exists() {
             return Ok(target.to_string_lossy().to_string());
         }
     }
+
     let url = remote_url.ok_or_else(|| {
         crate::presentation::vm::UiError::Unknown("attachment download url missing".to_string())
     })?;
@@ -4180,38 +4215,31 @@ async fn ensure_attachment_local_path(
         }
     };
 
+    // 2. 确定目标路径
     let target_path = if let Some(path) = save_to {
+        // 如果指定了另存为路径，保存到该路径
         Path::new(&path).to_path_buf()
     } else {
-        let mut base = std::env::var("HOME")
-            .map(|home| Path::new(&home).join("Downloads").join("PrivChat"))
-            .unwrap_or_else(|_| std::env::temp_dir().join("privchat-downloads"));
-        fs::create_dir_all(&base).map_err(|error| {
-            crate::presentation::vm::UiError::Unknown(format!(
-                "create download directory failed: {error}"
-            ))
+        // 否则统一保存到 Spec 定义的 message_id 目录下
+        // 路径：files/{yyyymm}/{message_id}/{filename}
+        let yyyymm = chrono::Utc::now().format("%Y%m");
+        let message_dir =
+            crate::app::paths::get_message_media_dir(uid, message_id, &yyyymm.to_string());
+
+        std::fs::create_dir_all(&message_dir).map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!("create message dir failed: {error}"))
         })?;
-        let suggested = filename.unwrap_or_else(|| {
-            url.rsplit('/')
-                .next()
-                .filter(|v| !v.is_empty())
-                .unwrap_or("attachment.bin")
-                .to_string()
-        });
-        base.push(suggested);
-        base
+
+        let fname = filename.unwrap_or_else(|| format!("attachment_{}", message_id));
+        message_dir.join(&fname)
     };
 
-    if let Some(parent) = target_path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            crate::presentation::vm::UiError::Unknown(format!(
-                "create target directory failed: {error}"
-            ))
+    // 3. 写入文件
+    tokio::fs::write(&target_path, &bytes)
+        .await
+        .map_err(|error| {
+            crate::presentation::vm::UiError::Unknown(format!("write file failed: {error}"))
         })?;
-    }
-    fs::write(&target_path, &bytes).map_err(|error| {
-        crate::presentation::vm::UiError::Unknown(format!("write attachment failed: {error}"))
-    })?;
 
     Ok(target_path.to_string_lossy().to_string())
 }

@@ -269,11 +269,9 @@ fn resolve_local_media_path(
         }
 
         for uid in uid_candidates {
-            let message_dir = users_root
-                .join(&uid)
-                .join("files")
-                .join(&yyyymm)
-                .join(&message_dir_name);
+            let uid_val = uid.parse::<u64>().unwrap_or(0);
+            let message_dir =
+                crate::app::paths::get_message_media_dir(uid_val, message_id, &yyyymm);
 
             if let Some(filename) = filename.as_ref() {
                 let candidate = message_dir.join(filename);
