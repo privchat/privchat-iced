@@ -324,6 +324,18 @@ pub enum AppMessage {
         result: Result<String, UiError>,
     },
     CloseImagePreview,
+    OpenUserProfile {
+        user_id: u64,
+    },
+    UserProfileLoaded {
+        user_id: u64,
+        detail: AddFriendDetailVm,
+    },
+    UserProfileLoadFailed {
+        user_id: u64,
+        error: UiError,
+    },
+    CloseUserProfile,
     MediaThumbnailDownloaded {
         message_id: u64,
         local_path: String,

@@ -274,6 +274,15 @@ pub struct ChatScreenState {
     pub typing_user_id: Option<u64>,
     pub preview_image_path: Option<String>,
     pub attachment_menu: Option<AttachmentMenuState>,
+    pub user_profile_panel: Option<UserProfilePanelState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UserProfilePanelState {
+    pub user_id: u64,
+    pub loading: bool,
+    pub detail: Option<crate::presentation::vm::AddFriendDetailVm>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone)]

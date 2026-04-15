@@ -1933,6 +1933,71 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::OpenUserProfile { user_id } => {
+            tracing::info!(
+                "OpenUserProfile: user_id={} peer_user_id={:?} channel_id={:?}",
+                user_id,
+                state.active_chat.as_ref().map(|c| c.peer_user_id),
+                state.active_chat.as_ref().map(|c| c.channel_id),
+            );
+            let fallback_name = state
+                .active_chat
+                .as_ref()
+                .map(|c| c.title.clone());
+            let channel_id = state
+                .active_chat
+                .as_ref()
+                .map(|c| c.channel_id)
+                .unwrap_or(0);
+            if let Some(chat) = &mut state.active_chat {
+                chat.user_profile_panel = Some(crate::app::state::UserProfilePanelState {
+                    user_id,
+                    loading: true,
+                    detail: None,
+                    error: None,
+                });
+            }
+            let bridge = bridge.clone();
+            Task::perform(
+                async move { bridge.load_user_profile(user_id, channel_id, fallback_name).await },
+                move |result| match result {
+                    Ok(detail) => AppMessage::UserProfileLoaded { user_id, detail },
+                    Err(error) => AppMessage::UserProfileLoadFailed { user_id, error },
+                },
+            )
+        }
+
+        AppMessage::UserProfileLoaded { user_id, detail } => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    if panel.user_id == user_id {
+                        panel.loading = false;
+                        panel.detail = Some(detail);
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::UserProfileLoadFailed { user_id, error } => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    if panel.user_id == user_id {
+                        panel.loading = false;
+                        panel.error = Some(format!("{error:?}"));
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::CloseUserProfile => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.user_profile_panel = None;
+            }
+            Task::none()
+        }
+
         AppMessage::MediaThumbnailDownloaded {
             message_id,
             local_path,
@@ -2347,6 +2412,7 @@ fn handle_conversation_selected(
         typing_user_id: None,
         preview_image_path: None,
         attachment_menu: None,
+        user_profile_panel: None,
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 

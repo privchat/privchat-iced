@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, mouse_area, row, stack, text};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text};
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
@@ -26,13 +26,25 @@ pub fn view<'a>(
     typing_hint: Option<&'a str>,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
 ) -> Element<'a, AppMessage> {
-    let header_title = column![
+    let title_label: Element<'_, AppMessage> = if let Some(peer_user_id) = chat.peer_user_id {
+        mouse_area(
+            text(title)
+                .size(17)
+                .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+        )
+        .on_press(AppMessage::OpenUserProfile {
+            user_id: peer_user_id,
+        })
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+    } else {
         text(title)
             .size(17)
-            .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
-        presence_status_text(presence, typing_hint),
-    ]
-    .spacing(3);
+            .color(Color::from_rgb8(0xF0, 0xF2, 0xF4))
+            .into()
+    };
+
+    let header_title = column![title_label, presence_status_text(presence, typing_hint),].spacing(3);
     let header = container(
         row![
             header_title,
@@ -233,9 +245,177 @@ pub fn view<'a>(
         content
     };
 
+    // User profile panel overlay
+    let content: Element<'_, AppMessage> =
+        if let Some(profile_panel) = &chat.user_profile_panel {
+            stack![
+                content,
+                mouse_area(
+                    container(text(""))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                        .style(|_| container::Style {
+                            background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.5))),
+                            ..container::Style::default()
+                        })
+                )
+                .on_press(AppMessage::CloseUserProfile),
+                container(user_profile_card(profile_panel))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .align_x(alignment::Horizontal::Center)
+                    .align_y(alignment::Vertical::Center)
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            content
+        };
+
     container(content)
         .width(Length::Fill)
         .height(Length::Fill)
+        .into()
+}
+
+const C_CARD_BG: Color = Color::from_rgb8(0x25, 0x2A, 0x31);
+const C_CARD_BORDER: Color = Color::from_rgb8(0x3A, 0x41, 0x4B);
+const C_CARD_FIELD_LABEL: Color = Color::from_rgb8(0x8B, 0x93, 0x9E);
+const C_CARD_FIELD_VALUE: Color = Color::from_rgb8(0xE0, 0xE4, 0xE9);
+
+fn user_profile_card<'a>(
+    panel: &'a crate::app::state::UserProfilePanelState,
+) -> Element<'a, AppMessage> {
+    let content: Element<'_, AppMessage> = if panel.loading {
+        container(
+            column![
+                text("⏳").size(28),
+                text("正在加载用户资料...")
+                    .size(14)
+                    .color(C_CARD_FIELD_LABEL),
+            ]
+            .spacing(10)
+            .align_x(alignment::Horizontal::Center),
+        )
+        .padding(30)
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .into()
+    } else if let Some(error) = &panel.error {
+        let retry_btn = button(
+            text("重试").size(13).color(Color::from_rgb8(0x6B, 0x9F, 0xD2)),
+        )
+        .padding([6, 16])
+        .on_press(AppMessage::OpenUserProfile {
+            user_id: panel.user_id,
+        })
+        .style(|_theme, _status| button::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x2F, 0x35, 0x3E))),
+            border: border::width(1.0)
+                .color(Color::from_rgb8(0x4A, 0x52, 0x5E))
+                .rounded(6.0),
+            ..button::Style::default()
+        });
+
+        container(
+            column![
+                text("加载失败").size(15).color(Color::from_rgb8(0xEA, 0x5E, 0x5E)),
+                text(error).size(12).color(C_CARD_FIELD_LABEL),
+                retry_btn,
+            ]
+            .spacing(10)
+            .align_x(alignment::Horizontal::Center),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .into()
+    } else if let Some(detail) = &panel.detail {
+        let mut items = column![
+            text(&detail.title)
+                .size(18)
+                .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+            text(&detail.subtitle)
+                .size(13)
+                .color(C_CARD_FIELD_LABEL),
+        ]
+        .spacing(6);
+
+        // separator
+        items = items.push(
+            container(text(""))
+                .height(Length::Fixed(1.0))
+                .width(Length::Fill)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(C_CARD_BORDER)),
+                    ..container::Style::default()
+                }),
+        );
+
+        for f in &detail.fields {
+            let copy_btn = button(
+                text("复制").size(11).color(Color::from_rgb8(0x6B, 0x9F, 0xD2)),
+            )
+            .padding([2, 6])
+            .on_press(AppMessage::CopyDetailFieldPressed {
+                label: f.label.clone(),
+                value: f.value.clone(),
+            })
+            .style(|_theme, _status| button::Style {
+                background: None,
+                ..button::Style::default()
+            });
+
+            items = items.push(
+                row![
+                    container(text(&f.label).size(13).color(C_CARD_FIELD_LABEL))
+                        .width(Length::Fixed(80.0)),
+                    text(&f.value).size(13).color(C_CARD_FIELD_VALUE),
+                    copy_btn,
+                ]
+                .spacing(8)
+                .align_y(alignment::Vertical::Center),
+            );
+        }
+
+        scrollable(
+            container(items)
+                .padding(20)
+                .width(Length::Fill),
+        )
+        .height(Length::Shrink)
+        .into()
+    } else {
+        container(text("")).into()
+    };
+
+    // Wrap in a card with close button
+    let close_btn = button(text("✕").size(14).color(C_CARD_FIELD_LABEL))
+        .padding([4, 8])
+        .on_press(AppMessage::CloseUserProfile)
+        .style(|_theme, _status| button::Style {
+            background: None,
+            ..button::Style::default()
+        });
+
+    let card = column![
+        container(close_btn)
+            .width(Length::Fill)
+            .align_x(alignment::Horizontal::Right)
+            .padding(8),
+        content,
+    ];
+
+    container(card)
+        .width(Length::Fixed(340.0))
+        .style(|_| container::Style {
+            background: Some(Background::Color(C_CARD_BG)),
+            border: border::width(1.0)
+                .color(C_CARD_BORDER)
+                .rounded(12.0),
+            ..container::Style::default()
+        })
         .into()
 }
 

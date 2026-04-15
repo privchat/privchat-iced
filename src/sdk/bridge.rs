@@ -207,6 +207,12 @@ pub trait SdkBridge: Send + Sync + 'static {
         &self,
         item: AddFriendSelectionVm,
     ) -> Result<AddFriendDetailVm, UiError>;
+    async fn load_user_profile(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        fallback_name: Option<String>,
+    ) -> Result<AddFriendDetailVm, UiError>;
     async fn get_or_create_direct_channel(
         &self,
         target_user_id: u64,
@@ -404,7 +410,7 @@ impl PrivchatSdkBridge {
             .get_user_by_id(user_id)
             .await
             .map_err(map_sdk_error)?;
-        let remote = self
+        let remote = match self
             .sdk
             .rpc_call_typed::<_, AccountUserDetailResponse>(
                 routes::account_user::DETAIL,
@@ -416,10 +422,21 @@ impl PrivchatSdkBridge {
                 },
             )
             .await
-            .ok();
+        {
+            Ok(resp) => Some(resp),
+            Err(e) => {
+                tracing::warn!("load_user_detail remote failed for user_id={user_id}: {e:?}");
+                None
+            }
+        };
 
         if local.is_none() && remote.is_none() {
-            return Err(UiError::Unknown(format!("用户不存在: {user_id}")));
+            // 本地和远程都查不到时，用 user_id 兜底显示基本信息
+            return Ok(AddFriendDetailVm {
+                title: format!("用户 {user_id}"),
+                subtitle: format!("UID: {user_id}"),
+                fields: vec![field("用户 ID", user_id.to_string())],
+            });
         }
 
         let username = remote
@@ -466,6 +483,14 @@ impl PrivchatSdkBridge {
         }
 
         if let Some(remote) = remote {
+            // 账号类型：0=普通用户, 1=系统用户, 2=机器人
+            let account_type_label = match remote.user_type {
+                0 => "普通用户",
+                1 => "系统用户",
+                2 => "机器人",
+                _ => "未知",
+            };
+            fields.push(field("账号类型", account_type_label));
             if let Some(value) = non_empty(remote.phone.as_deref()) {
                 fields.push(field("手机号", value));
             }
@@ -1253,6 +1278,25 @@ impl SdkBridge for PrivchatSdkBridge {
                 })
             }
         }
+    }
+
+    async fn load_user_profile(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        fallback_name: Option<String>,
+    ) -> Result<AddFriendDetailVm, UiError> {
+        let mut detail = self
+            .load_user_detail(user_id, "conversation", channel_id.to_string())
+            .await?;
+        // 如果标题仍是默认的 "用户 {id}"，且调用方提供了 fallback 名称，则替换
+        let default_title = format!("用户 {user_id}");
+        if detail.title == default_title {
+            if let Some(name) = fallback_name.filter(|n| !n.is_empty()) {
+                detail.title = name;
+            }
+        }
+        Ok(detail)
     }
 
     async fn get_or_create_direct_channel(
