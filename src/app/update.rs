@@ -1682,7 +1682,7 @@ pub fn update(
             if let Some(local) = local_path {
                 let path = Path::new(&local);
                 if path.exists() {
-                    return match open_with_system(&local) {
+                    return match reveal_in_file_manager(&local) {
                         Ok(()) => Task::none(),
                         Err(error) => {
                             Task::done(AppMessage::AttachmentOpenResolved { result: Err(error) })
@@ -1713,7 +1713,7 @@ pub fn update(
                         created_at,
                     )
                     .await?;
-                    open_with_system(&path)?;
+                    reveal_in_file_manager(&path)?;
                     Ok(path)
                 },
                 |result| AppMessage::AttachmentOpenResolved { result },
@@ -1795,7 +1795,7 @@ pub fn update(
                     if let Some(local) = menu.local_path {
                         let path = Path::new(&local);
                         if path.exists() {
-                            return match open_with_system(&local) {
+                            return match reveal_in_file_manager(&local) {
                                 Ok(()) => Task::none(),
                                 Err(error) => Task::done(AppMessage::AttachmentOpenResolved {
                                     result: Err(error),
@@ -1829,7 +1829,7 @@ pub fn update(
                                 created_at,
                             )
                             .await?;
-                            open_with_system(&path)?;
+                            reveal_in_file_manager(&path)?;
                             Ok(path)
                         },
                         |result| AppMessage::AttachmentOpenResolved { result },
@@ -4603,6 +4603,37 @@ fn open_with_system(target: &str) -> Result<(), crate::presentation::vm::UiError
             } else {
                 Err(crate::presentation::vm::UiError::Unknown(format!(
                     "open command exited with status: {s}"
+                )))
+            }
+        })
+}
+
+fn reveal_in_file_manager(file_path: &str) -> Result<(), crate::presentation::vm::UiError> {
+    #[cfg(target_os = "macos")]
+    let status = std::process::Command::new("open")
+        .args(["-R", file_path])
+        .status();
+    #[cfg(target_os = "linux")]
+    let status = {
+        let parent = Path::new(file_path)
+            .parent()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| file_path.to_string());
+        std::process::Command::new("xdg-open").arg(&parent).status()
+    };
+    #[cfg(target_os = "windows")]
+    let status = std::process::Command::new("explorer")
+        .args(["/select,", file_path])
+        .status();
+
+    status
+        .map_err(|e| crate::presentation::vm::UiError::Unknown(format!("spawn file manager failed: {e}")))
+        .and_then(|s| {
+            if s.success() {
+                Ok(())
+            } else {
+                Err(crate::presentation::vm::UiError::Unknown(format!(
+                    "file manager exited with status: {s}"
                 )))
             }
         })
