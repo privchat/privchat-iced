@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use iced::widget::{column, container, scrollable, text};
 use iced::{border, Background, Color, Element, Length, Theme};
 
@@ -9,12 +11,13 @@ const C_CHAT_BG: Color = Color::from_rgb8(0x18, 0x1A, 0x1F);
 const MEDIA_PREVIEW_WINDOW: usize = 12;
 
 /// Render the scrollable timeline in a WeChat-like visual style.
-pub fn view(
+pub fn view<'a>(
     channel_id: u64,
     channel_type: i32,
-    timeline: &TimelineState,
+    timeline: &'a TimelineState,
     opened_menu_message_id: Option<u64>,
-) -> Element<'_, AppMessage> {
+    image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
+) -> Element<'a, AppMessage> {
     let mut list = column!().spacing(14).padding([12, 18]);
 
     if timeline.is_loading_more {
@@ -29,6 +32,7 @@ pub fn view(
                 message,
                 opened_menu_message_id,
                 render_media_preview,
+                image_cache,
             ));
         }
     }

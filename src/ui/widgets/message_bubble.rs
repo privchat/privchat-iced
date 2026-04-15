@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use iced::widget::{button, column, container, image, mouse_area, row, text};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 use privchat_protocol::message::ContentMessageType;
@@ -27,11 +29,12 @@ fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static 
 }
 
 /// Render one timeline row in a WeChat-like bubble style.
-pub fn view(
-    message: &MessageVm,
+pub fn view<'a>(
+    message: &'a MessageVm,
     opened_menu_message_id: Option<u64>,
     render_media_preview: bool,
-) -> Element<'_, AppMessage> {
+    image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
+) -> Element<'a, AppMessage> {
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
     } else {
@@ -99,32 +102,34 @@ pub fn view(
         .into()
     } else if message.message_type == IMAGE_MESSAGE_TYPE {
         if render_media_preview
-            && (message.media_local_path.is_some() || message.media_url.is_some())
+            && (message.local_thumbnail_path.is_some()
+                || message.media_local_path.is_some()
+                || message.media_url.is_some())
         {
-            let preview: Element<'_, AppMessage> =
-                if let Some(local_path) = &message.media_local_path {
-                    image(local_path.clone())
-                        .width(Length::Fixed(220.0))
-                        .height(Length::Fixed(160.0))
-                        .content_fit(iced::ContentFit::Cover)
-                        .into()
-                } else {
-                    container(
-                        text(&message.body)
-                            .size(14)
-                            .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
-                    )
+            // Use cached decoded Handle if available; otherwise show placeholder
+            let preview: Element<'_, AppMessage> = if let Some(handle) = image_cache.get(&message.message_id) {
+                image(handle.clone())
                     .width(Length::Fixed(220.0))
-                    .height(Length::Fixed(80.0))
-                    .align_x(alignment::Horizontal::Center)
-                    .align_y(alignment::Vertical::Center)
-                    .style(|_| container::Style {
-                        background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
-                        border: border::rounded(8.0),
-                        ..container::Style::default()
-                    })
+                    .height(Length::Fixed(160.0))
+                    .content_fit(iced::ContentFit::Cover)
                     .into()
-                };
+            } else {
+                container(
+                    text("[加载中...]")
+                        .size(14)
+                        .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
+                )
+                .width(Length::Fixed(220.0))
+                .height(Length::Fixed(80.0))
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center)
+                .style(|_| container::Style {
+                    background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
+                    border: border::rounded(8.0),
+                    ..container::Style::default()
+                })
+                .into()
+            };
             button(preview)
                 .style(navless_button_style)
                 .on_press(AppMessage::OpenAttachment {
@@ -135,7 +140,10 @@ pub fn view(
                     filename: Some(message.body.clone()),
                 })
                 .into()
-        } else if message.media_local_path.is_some() || message.media_url.is_some() {
+        } else if message.local_thumbnail_path.is_some()
+            || message.media_local_path.is_some()
+            || message.media_url.is_some()
+        {
             container(
                 text("[图片]")
                     .size(14)

@@ -141,6 +141,7 @@ pub struct MessageVm {
     pub media_url: Option<String>,
     pub media_file_id: Option<u64>,
     pub media_local_path: Option<String>,
+    pub local_thumbnail_path: Option<String>,
     pub media_file_size: Option<u64>,
     pub created_at: i64,
     pub pts: Option<u64>,

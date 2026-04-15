@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use iced::widget::text_editor;
+use iced::widget::{image as iced_image, text_editor};
 use iced::window;
 
 use crate::app::auth_prefs;
@@ -286,7 +286,6 @@ pub struct AttachmentMenuState {
     pub copy_text: Option<String>,
 }
 
-#[derive(Debug)]
 pub struct AppState {
     pub route: Route,
     pub main_window_id: Option<window::Id>,
@@ -304,13 +303,28 @@ pub struct AppState {
     pub runtime_logs: VecDeque<String>,
     pub connection_title_state: ConnectionTitleState,
     /// 当前会话激活上下文（v1 仅按 channel_id 判定）。
-    /// None 表示“当前不在任何会话阅读态”，所有自动已读逻辑必须失活。
+    /// None 表示"当前不在任何会话阅读态"，所有自动已读逻辑必须失活。
     pub active_read_channel_id: Option<u64>,
     /// Monotonic counter bumped on every account switch / login / restore.
     /// Included in the SDK event subscription hash so Iced recreates the stream.
     pub session_epoch: u64,
     pub media_downloads_inflight: HashSet<u64>,
+    /// Decoded RGBA image handles keyed by message_id. Reused across frames.
+    pub image_cache: HashMap<u64, iced_image::Handle>,
+    /// message_ids currently being decoded asynchronously.
+    pub image_decode_pending: HashSet<u64>,
     next_open_token: OpenToken,
+}
+
+impl std::fmt::Debug for AppState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppState")
+            .field("route", &self.route)
+            .field("active_chat", &self.active_chat)
+            .field("image_cache_len", &self.image_cache.len())
+            .field("image_decode_pending", &self.image_decode_pending)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -353,6 +367,8 @@ impl AppState {
             active_read_channel_id: None,
             session_epoch: 0,
             media_downloads_inflight: HashSet::new(),
+            image_cache: HashMap::new(),
+            image_decode_pending: HashSet::new(),
             next_open_token: 1,
         }
     }

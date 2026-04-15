@@ -1445,6 +1445,9 @@ impl SdkBridge for PrivchatSdkBridge {
                     searchable_word: String::new(),
                     setting: 0,
                     extra: String::new(),
+                    mime_type: None,
+                    media_downloaded: false,
+                    thumb_status: 0,
                 },
                 Some(client_txn_id),
             )
@@ -1536,6 +1539,9 @@ impl SdkBridge for PrivchatSdkBridge {
                     setting: 0,
                     // Keep metadata object non-null to satisfy server-side media validation.
                     extra: "{}".to_string(),
+                    mime_type: None,
+                    media_downloaded: false,
+                    thumb_status: 0,
                 },
                 Some(client_txn_id),
             )

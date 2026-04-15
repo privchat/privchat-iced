@@ -1,4 +1,4 @@
-use iced::widget::text_editor;
+use iced::widget::{image as iced_image, text_editor};
 use iced::window;
 
 use crate::presentation::vm::{
@@ -331,6 +331,13 @@ pub enum AppMessage {
     MediaThumbnailDownloadFailed {
         message_id: u64,
         error: UiError,
+    },
+    ImageDecoded {
+        message_id: u64,
+        handle: iced_image::Handle,
+    },
+    ImageDecodeFailed {
+        message_id: u64,
     },
     AddFriendInputChanged {
         text: String,

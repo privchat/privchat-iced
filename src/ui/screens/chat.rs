@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use iced::widget::{button, column, container, image, mouse_area, row, stack, text};
 use iced::{alignment, border, Background, Color, Element, Length};
 
@@ -22,6 +24,7 @@ pub fn view<'a>(
     title: &'a str,
     presence: Option<&'a PresenceVm>,
     typing_hint: Option<&'a str>,
+    image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
 ) -> Element<'a, AppMessage> {
     let header_title = column![
         text(title)
@@ -70,6 +73,7 @@ pub fn view<'a>(
                 chat.channel_type,
                 &chat.timeline,
                 chat.attachment_menu.as_ref().map(|m| m.message_id),
+                image_cache,
             ),
         ]
         .height(Length::Fill),

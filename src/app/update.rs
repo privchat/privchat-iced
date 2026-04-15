@@ -805,7 +805,9 @@ pub fn update(
                 .map(|chat| chat.timeline.items.clone())
                 .unwrap_or_default();
             let media_tasks = schedule_thumbnail_downloads_for_items(state, &media_items, bridge);
+            let decode_tasks = schedule_image_decodes(state);
             let mut tasks = media_tasks;
+            tasks.extend(decode_tasks);
 
             // Read Gate v1: Entering a conversation activates the read context
             enter_reading_conversation(state, channel_id);
@@ -1936,9 +1938,17 @@ pub fn update(
                     .iter_mut()
                     .find(|item| item.message_id == message_id)
                 {
-                    item.media_local_path = Some(local_path);
-                    chat.preview_image_path = item.media_local_path.clone();
+                    if is_thumbnail_local_path(&local_path) {
+                        item.local_thumbnail_path = Some(local_path.clone());
+                    } else {
+                        item.media_local_path = Some(local_path.clone());
+                    }
                 }
+            }
+            // Trigger async decode for the newly downloaded image
+            let decode_tasks = schedule_image_decodes(state);
+            if !decode_tasks.is_empty() {
+                return Task::batch(decode_tasks);
             }
             Task::none()
         }
@@ -1952,6 +1962,17 @@ pub fn update(
                 message_id,
                 format_ui_error(&error)
             );
+            Task::none()
+        }
+
+        AppMessage::ImageDecoded { message_id, handle } => {
+            state.image_decode_pending.remove(&message_id);
+            state.image_cache.insert(message_id, handle);
+            Task::none()
+        }
+
+        AppMessage::ImageDecodeFailed { message_id } => {
+            state.image_decode_pending.remove(&message_id);
             Task::none()
         }
 
@@ -2066,6 +2087,14 @@ pub fn update(
             source,
             message,
         } => {
+            if let Some(ref msg) = message {
+                eprintln!(
+                    "[msg.loaded] id={} type={} is_own={} thumb={:?} local={:?} url={:?} file_id={:?} body_len={}",
+                    msg.message_id, msg.message_type, msg.is_own,
+                    msg.local_thumbnail_path, msg.media_local_path,
+                    msg.media_url, msg.media_file_id, msg.body.len(),
+                );
+            }
             let media_tasks = message
                 .as_ref()
                 .map(|item| schedule_thumbnail_download_for_message(state, item, bridge))
@@ -2150,14 +2179,13 @@ pub fn update(
                 }
             }
             if let Some(items) = media_items {
-                let media_tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
+                let mut tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
+                tasks.extend(schedule_image_decodes(state));
                 if should_refresh_unread {
-                    let mut tasks = media_tasks;
                     tasks.push(schedule_total_unread_refresh(bridge));
-                    return Task::batch(tasks);
                 }
-                if !media_tasks.is_empty() {
-                    return Task::batch(media_tasks);
+                if !tasks.is_empty() {
+                    return Task::batch(tasks);
                 }
             }
             Task::none()
@@ -2188,8 +2216,11 @@ pub fn update(
                 media_items = Some(chat.timeline.items.clone());
             }
             if let Some(items) = media_items {
-                let tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
-                return Task::batch(tasks);
+                let mut tasks = schedule_thumbnail_downloads_for_items(state, &items, bridge);
+                tasks.extend(schedule_image_decodes(state));
+                if !tasks.is_empty() {
+                    return Task::batch(tasks);
+                }
             }
             Task::none()
         }
@@ -2900,6 +2931,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             media_url: None,
             media_file_id: None,
             media_local_path: None,
+            local_thumbnail_path: None,
             media_file_size: None,
             created_at: now,
             pts: None,
@@ -3054,6 +3086,7 @@ fn handle_send_attachment_path(
             } else {
                 None
             },
+            local_thumbnail_path: None,
             media_file_size: local_file_size,
             created_at: now,
             pts: None,
@@ -4020,6 +4053,67 @@ fn schedule_thumbnail_downloads_for_items(
         .collect()
 }
 
+/// Scan timeline items for image messages that need async decoding.
+/// Returns Tasks that decode images in background and deliver Handle via ImageDecoded.
+fn schedule_image_decodes(state: &mut AppState) -> Vec<Task<AppMessage>> {
+    const DECODE_WINDOW: usize = 12;
+    let items: Vec<(u64, String)> = state
+        .active_chat
+        .as_ref()
+        .map(|chat| {
+            let start = chat.timeline.items.len().saturating_sub(DECODE_WINDOW);
+            chat.timeline.items[start..]
+                .iter()
+                .filter(|item| item.message_type == IMAGE_MESSAGE_TYPE && !item.is_deleted)
+                .filter(|item| {
+                    !state.image_cache.contains_key(&item.message_id)
+                        && !state.image_decode_pending.contains(&item.message_id)
+                })
+                .filter_map(|item| {
+                    let path = item
+                        .local_thumbnail_path
+                        .as_deref()
+                        .or(item.media_local_path.as_deref())?;
+                    if Path::new(path).exists() {
+                        Some((item.message_id, path.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    items
+        .into_iter()
+        .map(|(message_id, path)| {
+            state.image_decode_pending.insert(message_id);
+            Task::perform(
+                async move { decode_image_to_rgba(path).await },
+                move |result| match result {
+                    Some(handle) => AppMessage::ImageDecoded { message_id, handle },
+                    None => AppMessage::ImageDecodeFailed { message_id },
+                },
+            )
+        })
+        .collect()
+}
+
+/// Decode an image file into an iced Handle (RGBA) in a blocking task.
+/// Resizes to fit within 440x320 for display.
+async fn decode_image_to_rgba(path: String) -> Option<iced::widget::image::Handle> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).ok()?;
+        let img = ::image::load_from_memory(&bytes).ok()?;
+        let resized = img.resize(440, 320, ::image::imageops::FilterType::Triangle);
+        let rgba = resized.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some(iced::widget::image::Handle::from_rgba(w, h, rgba.into_raw()))
+    })
+    .await
+    .ok()?
+}
+
 fn schedule_thumbnail_download_for_message(
     state: &mut AppState,
     item: &MessageVm,
@@ -4028,42 +4122,90 @@ fn schedule_thumbnail_download_for_message(
     if item.message_type != IMAGE_MESSAGE_TYPE {
         return None;
     }
+    if let Some(thumb_path) = item.local_thumbnail_path.as_ref() {
+        if Path::new(thumb_path).exists() {
+            return None;
+        }
+    }
     if let Some(local_path) = item.media_local_path.as_ref() {
-        // Keep "thumbnail first" UX, but if current local is only a thumbnail,
-        // continue downloading the original image in background.
         if Path::new(local_path).exists() && !is_thumbnail_local_path(local_path) {
             return None;
         }
     }
-    let file_id = item.media_file_id?;
     let user_id = state.auth.user_id?;
     if !state.media_downloads_inflight.insert(item.message_id) {
         return None;
     }
 
-    let bridge = Arc::clone(bridge);
     let message_id = item.message_id;
-    let target_path = media_image_cache_path(
-        user_id,
-        item.created_at,
-        message_id,
-        &format!("file_{file_id}"),
-    )
-    .to_string_lossy()
-    .to_string();
-    Some(Task::perform(
-        async move {
-            let url = bridge.get_file_url(file_id).await?;
-            download_image_thumbnail(message_id, url, target_path).await
-        },
-        move |result| match result {
-            Ok(local_path) => AppMessage::MediaThumbnailDownloaded {
-                message_id,
-                local_path,
+    let created_at = item.created_at;
+    // 保存到 canonical thumb.webp 路径，与 SDK 规范一致
+    let yyyymm = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(created_at)
+        .map(|dt| dt.format("%Y%m").to_string())
+        .unwrap_or_else(|| chrono::Utc::now().format("%Y%m").to_string());
+    let target_path = media_data_root()
+        .join("users")
+        .join(user_id.to_string())
+        .join("files")
+        .join(yyyymm)
+        .join(message_id.to_string())
+        .join("thumb.webp")
+        .to_string_lossy()
+        .to_string();
+
+    if let Some(file_id) = item.media_file_id {
+        let bridge = Arc::clone(bridge);
+        Some(Task::perform(
+            async move {
+                let url = bridge.get_file_url(file_id).await?;
+                download_image_thumbnail(message_id, url, target_path).await
             },
-            Err(error) => AppMessage::MediaThumbnailDownloadFailed { message_id, error },
-        },
-    ))
+            move |result| match result {
+                Ok(local_path) => AppMessage::MediaThumbnailDownloaded {
+                    message_id,
+                    local_path,
+                },
+                Err(_) => AppMessage::MediaThumbnailDownloadFailed {
+                    message_id,
+                    error: result.unwrap_err(),
+                },
+            },
+        ))
+    } else if let Some(url) = item.media_url.clone() {
+        Some(Task::perform(
+            async move { download_image_thumbnail(message_id, url, target_path).await },
+            move |result| match result {
+                Ok(local_path) => AppMessage::MediaThumbnailDownloaded {
+                    message_id,
+                    local_path,
+                },
+                Err(_) => AppMessage::MediaThumbnailDownloadFailed {
+                    message_id,
+                    error: result.unwrap_err(),
+                },
+            },
+        ))
+    } else {
+        state.media_downloads_inflight.remove(&message_id);
+        None
+    }
+}
+
+/// 通过 magic bytes 检测图片真实格式
+fn detect_image_extension(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\x89PNG") {
+        "png"
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        "jpg"
+    } else if bytes.starts_with(b"GIF8") {
+        "gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "webp"
+    } else if bytes.starts_with(b"BM") {
+        "bmp"
+    } else {
+        "png" // 默认 PNG
+    }
 }
 
 fn infer_file_extension(url: &str) -> &'static str {
@@ -4107,7 +4249,11 @@ async fn download_image_thumbnail(
         }
     };
 
-    let file_path = PathBuf::from(target_path);
+    let mut file_path = PathBuf::from(target_path);
+    // 检测真实图片格式，修正扩展名（避免 PNG 存为 .webp 等导致 iced 无法加载）
+    let real_ext = detect_image_extension(&bytes);
+    file_path.set_extension(real_ext);
+
     if let Some(parent) = file_path.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             crate::presentation::vm::UiError::Unknown(format!(
@@ -4610,6 +4756,7 @@ mod tests {
             media_url: None,
             media_file_id: None,
             media_local_path: None,
+            local_thumbnail_path: None,
             media_file_size: None,
             created_at: 0,
             pts: None,
@@ -4639,6 +4786,7 @@ mod tests {
             media_url: None,
             media_file_id: None,
             media_local_path: None,
+            local_thumbnail_path: None,
             media_file_size: None,
             created_at,
             pts: Some(pts),
@@ -4763,6 +4911,7 @@ mod tests {
             media_url: None,
             media_file_id: None,
             media_local_path: None,
+            local_thumbnail_path: None,
             media_file_size: None,
             created_at: 0,
             pts: Some(99),
@@ -4810,6 +4959,7 @@ mod tests {
             media_url: None,
             media_file_id: None,
             media_local_path: None,
+            local_thumbnail_path: None,
             media_file_size: None,
             created_at: 1,
             pts: Some(22),

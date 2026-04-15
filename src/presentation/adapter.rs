@@ -375,6 +375,58 @@ fn extract_media_info(
     (local_path, resolved_url, file_id_from_metadata)
 }
 
+fn resolve_local_thumbnail_path(
+    current_uid: Option<u64>,
+    message_id: u64,
+    created_at: i64,
+    message_type: i32,
+) -> Option<String> {
+    // 仅对图片/视频消息查找缩略图
+    if !matches!(message_type, IMAGE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE) {
+        return None;
+    }
+    // 直接检查文件是否存在，不依赖 thumb_status（SDK 可能异步下载完成）
+    for root in sdk_storage_roots() {
+        let mut uid_candidates = Vec::new();
+        if let Some(uid) = current_uid {
+            uid_candidates.push(uid);
+        }
+        let users_root = root.join("users");
+        if let Ok(entries) = std::fs::read_dir(&users_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(uid_val) = path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .and_then(|v| v.parse::<u64>().ok())
+                    {
+                        if !uid_candidates.contains(&uid_val) {
+                            uid_candidates.push(uid_val);
+                        }
+                    }
+                }
+            }
+        }
+        for uid_val in uid_candidates {
+            let msg_dir = privchat_sdk::media_store::get_canonical_message_dir(
+                &root,
+                uid_val,
+                message_id as i64,
+                created_at,
+            );
+            // 查找 thumb.* (thumb.webp, thumb.png, thumb.jpg 等)
+            for ext in ["webp", "png", "jpg", "jpeg", "gif"] {
+                let thumb_path = msg_dir.join(format!("thumb.{ext}"));
+                if thumb_path.exists() {
+                    return Some(thumb_path.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
 fn extract_media_file_size(content: &str, extra: &str) -> Option<u64> {
     let content_json = serde_json::from_str::<serde_json::Value>(content).ok();
     let content_envelope = parse_payload_envelope(content);
@@ -509,6 +561,12 @@ pub fn map_stored_message_to_vm(
         message.created_at,
     );
     let media_file_size = extract_media_file_size(&message.content, &message.extra);
+    let local_thumbnail_path = resolve_local_thumbnail_path(
+        current_uid,
+        message.message_id,
+        message.created_at,
+        message.message_type,
+    );
 
     MessageVm {
         key,
@@ -523,6 +581,7 @@ pub fn map_stored_message_to_vm(
         media_url,
         media_file_id,
         media_local_path,
+        local_thumbnail_path,
         media_file_size,
         created_at: message.created_at,
         pts: extract_pts(&message.extra),
