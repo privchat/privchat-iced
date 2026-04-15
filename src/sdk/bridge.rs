@@ -8,6 +8,7 @@ use iced::futures::SinkExt;
 use iced::stream;
 use iced::Subscription;
 use privchat_protocol::message::ContentMessageType;
+use privchat_protocol::rpc::account::user::{DetailSourceType, UserType};
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
     AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
@@ -483,14 +484,7 @@ impl PrivchatSdkBridge {
         }
 
         if let Some(remote) = remote {
-            // 账号类型：0=普通用户, 1=系统用户, 2=机器人
-            let account_type_label = match remote.user_type {
-                0 => "普通用户",
-                1 => "系统用户",
-                2 => "机器人",
-                _ => "未知",
-            };
-            fields.push(field("账号类型", account_type_label));
+            fields.push(field("账号类型", UserType::label(remote.user_type)));
             if let Some(value) = non_empty(remote.phone.as_deref()) {
                 fields.push(field("手机号", value));
             }
@@ -1155,7 +1149,7 @@ impl SdkBridge for PrivchatSdkBridge {
     ) -> Result<AddFriendDetailVm, UiError> {
         match item {
             AddFriendSelectionVm::Friend(user_id) => {
-                self.load_user_detail(user_id, "contact_list", format!("friend:{user_id}"))
+                self.load_user_detail(user_id, DetailSourceType::Friend.as_str(), user_id.to_string())
                     .await
             }
             AddFriendSelectionVm::Group(group_id) => {
@@ -1287,7 +1281,7 @@ impl SdkBridge for PrivchatSdkBridge {
         fallback_name: Option<String>,
     ) -> Result<AddFriendDetailVm, UiError> {
         let mut detail = self
-            .load_user_detail(user_id, "conversation", channel_id.to_string())
+            .load_user_detail(user_id, DetailSourceType::Conversation.as_str(), channel_id.to_string())
             .await?;
         // 如果标题仍是默认的 "用户 {id}"，且调用方提供了 fallback 名称，则替换
         let default_title = format!("用户 {user_id}");
