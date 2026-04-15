@@ -161,6 +161,10 @@ pub enum AppMessage {
         window_id: window::Id,
     },
     CloseLogsWindow,
+    ImageViewerWindowOpened {
+        window_id: window::Id,
+    },
+    CloseImageViewerWindow,
     CopyLogsPressed,
     ClearLogsPressed,
     ExportLogsPressed,

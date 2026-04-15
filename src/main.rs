@@ -70,6 +70,11 @@ fn view(app: &PrivchatApp, window_id: window::Id) -> Element<'_, AppMessage> {
         let feedback = app.state.settings.logs_feedback.clone();
         return ui::screens::logs::view(logs, feedback);
     }
+    if app.state.image_viewer_window_id == Some(window_id) {
+        if let Some(viewer) = &app.state.image_viewer {
+            return ui::screens::image_viewer::view(viewer);
+        }
+    }
 
     match app.state.route {
         Route::Splash => ui::screens::splash::view(),
@@ -94,6 +99,12 @@ fn window_title(app: &PrivchatApp, window_id: window::Id) -> String {
     }
     if app.state.logs_window_id == Some(window_id) {
         return "PrivChat 日志窗口".to_string();
+    }
+    if app.state.image_viewer_window_id == Some(window_id) {
+        return app.state.image_viewer
+            .as_ref()
+            .map(|v| v.title.clone())
+            .unwrap_or_else(|| "图片查看器".to_string());
     }
 
     let my_name = app.state.auth.username.trim();

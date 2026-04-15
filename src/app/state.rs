@@ -272,7 +272,6 @@ pub struct ChatScreenState {
     pub typing_hint: Option<String>,
     /// 记录当前正在输入的用户 ID，用于在收到该用户消息时精确清除气泡
     pub typing_user_id: Option<u64>,
-    pub image_preview: Option<ImagePreviewState>,
     pub attachment_menu: Option<AttachmentMenuState>,
     pub user_profile_panel: Option<UserProfilePanelState>,
 }
@@ -286,16 +285,13 @@ pub struct UserProfilePanelState {
 }
 
 #[derive(Debug, Clone)]
-pub struct ImagePreviewState {
+pub struct ImageViewerState {
     pub message_id: u64,
-    /// 当前显示的图片路径（原图或缩略图）
     pub image_path: String,
-    /// 是否正在下载原图
     pub loading_original: bool,
-    /// 原图本地路径（下载完成后填充）
     pub original_path: Option<String>,
-    /// 缩略图路径（用于下载原图期间显示）
     pub thumbnail_path: Option<String>,
+    pub title: String,
 }
 
 #[derive(Debug, Clone)]
@@ -313,6 +309,8 @@ pub struct AppState {
     pub main_window_id: Option<window::Id>,
     pub add_friend_search_window_id: Option<window::Id>,
     pub logs_window_id: Option<window::Id>,
+    pub image_viewer_window_id: Option<window::Id>,
+    pub image_viewer: Option<ImageViewerState>,
     pub active_chat: Option<ChatScreenState>,
     pub auth: AuthState,
     pub layout: WorkspaceLayoutState,
@@ -375,6 +373,8 @@ impl AppState {
             main_window_id: None,
             add_friend_search_window_id: None,
             logs_window_id: None,
+            image_viewer_window_id: None,
+            image_viewer: None,
             active_chat: None,
             auth: AuthState::default(),
             layout: WorkspaceLayoutState::default(),

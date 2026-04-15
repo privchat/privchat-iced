@@ -1,4 +1,5 @@
 pub mod add_friend;
+pub mod image_viewer;
 pub mod chat;
 pub mod login;
 pub mod logs;
