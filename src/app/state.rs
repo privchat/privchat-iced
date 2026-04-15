@@ -272,7 +272,7 @@ pub struct ChatScreenState {
     pub typing_hint: Option<String>,
     /// 记录当前正在输入的用户 ID，用于在收到该用户消息时精确清除气泡
     pub typing_user_id: Option<u64>,
-    pub preview_image_path: Option<String>,
+    pub image_preview: Option<ImagePreviewState>,
     pub attachment_menu: Option<AttachmentMenuState>,
     pub user_profile_panel: Option<UserProfilePanelState>,
 }
@@ -283,6 +283,19 @@ pub struct UserProfilePanelState {
     pub loading: bool,
     pub detail: Option<crate::presentation::vm::AddFriendDetailVm>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImagePreviewState {
+    pub message_id: u64,
+    /// 当前显示的图片路径（原图或缩略图）
+    pub image_path: String,
+    /// 是否正在下载原图
+    pub loading_original: bool,
+    /// 原图本地路径（下载完成后填充）
+    pub original_path: Option<String>,
+    /// 缩略图路径（用于下载原图期间显示）
+    pub thumbnail_path: Option<String>,
 }
 
 #[derive(Debug, Clone)]

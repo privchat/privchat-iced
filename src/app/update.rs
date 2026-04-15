@@ -1548,33 +1548,152 @@ pub fn update(
 
         AppMessage::OpenImagePreview {
             message_id,
+            original_path,
+            thumbnail_path,
+            media_url,
+            file_id,
+            created_at,
+        } => {
+            // 优先使用原图本地路径
+            let original_exists = original_path
+                .as_ref()
+                .map(|p| Path::new(p).exists())
+                .unwrap_or(false);
+
+            if original_exists {
+                // 原图已存在，直接显示
+                let path = original_path.unwrap();
+                if let Some(chat) = &mut state.active_chat {
+                    chat.image_preview = Some(crate::app::state::ImagePreviewState {
+                        message_id,
+                        image_path: path.clone(),
+                        loading_original: false,
+                        original_path: Some(path),
+                        thumbnail_path,
+                    });
+                }
+                Task::none()
+            } else {
+                // 先显示缩略图，后台下载原图
+                let display_path = thumbnail_path
+                    .clone()
+                    .unwrap_or_default();
+
+                if let Some(chat) = &mut state.active_chat {
+                    chat.image_preview = Some(crate::app::state::ImagePreviewState {
+                        message_id,
+                        image_path: display_path,
+                        loading_original: true,
+                        original_path: None,
+                        thumbnail_path: thumbnail_path.clone(),
+                    });
+                }
+
+                // 尝试下载原图
+                let user_id = state.auth.user_id.unwrap_or(0);
+                let bridge = bridge.clone();
+
+                if let Some(fid) = file_id {
+                    // 通过 file_id 获取下载链接后下载
+                    let created_at_ms = if created_at > 9_999_999_999 {
+                        created_at
+                    } else {
+                        created_at * 1000
+                    };
+                    Task::perform(
+                        async move {
+                            let url = bridge.get_file_url(fid).await?;
+                            let target_path = media_image_cache_path(
+                                user_id,
+                                created_at_ms,
+                                message_id,
+                                &url,
+                            )
+                            .to_string_lossy()
+                            .to_string();
+                            download_image_thumbnail(message_id, url, target_path).await
+                        },
+                        move |result| match result {
+                            Ok(path) => AppMessage::ImageOriginalReady {
+                                message_id,
+                                local_path: path,
+                            },
+                            Err(error) => AppMessage::ImageOriginalFailed {
+                                message_id,
+                                error,
+                            },
+                        },
+                    )
+                } else if let Some(url) = media_url {
+                    // 直接通过 URL 下载
+                    let created_at_ms = if created_at > 9_999_999_999 {
+                        created_at
+                    } else {
+                        created_at * 1000
+                    };
+                    let target_path = media_image_cache_path(
+                        user_id,
+                        created_at_ms,
+                        message_id,
+                        &url,
+                    )
+                    .to_string_lossy()
+                    .to_string();
+                    Task::perform(
+                        async move {
+                            download_image_thumbnail(message_id, url, target_path).await
+                        },
+                        move |result| match result {
+                            Ok(path) => AppMessage::ImageOriginalReady {
+                                message_id,
+                                local_path: path,
+                            },
+                            Err(error) => AppMessage::ImageOriginalFailed {
+                                message_id,
+                                error,
+                            },
+                        },
+                    )
+                } else {
+                    // 没有下载源，只显示缩略图
+                    if let Some(chat) = &mut state.active_chat {
+                        if let Some(preview) = &mut chat.image_preview {
+                            preview.loading_original = false;
+                        }
+                    }
+                    Task::none()
+                }
+            }
+        }
+
+        AppMessage::ImageOriginalReady {
+            message_id,
             local_path,
         } => {
-            if local_path.starts_with("http://") || local_path.starts_with("https://") {
-                let url = local_path.clone();
-                let target_path = media_thumbnail_cache_path(
-                    state.auth.user_id.unwrap_or(0),
-                    now_timestamp_millis(),
-                    message_id,
-                    &url,
-                )
-                .to_string_lossy()
-                .to_string();
-                return Task::perform(
-                    async move { download_image_thumbnail(message_id, url, target_path).await },
-                    move |result| match result {
-                        Ok(path) => AppMessage::MediaThumbnailDownloaded {
-                            message_id,
-                            local_path: path,
-                        },
-                        Err(error) => {
-                            AppMessage::MediaThumbnailDownloadFailed { message_id, error }
-                        }
-                    },
-                );
-            }
             if let Some(chat) = &mut state.active_chat {
-                chat.preview_image_path = Some(local_path);
+                if let Some(preview) = &mut chat.image_preview {
+                    if preview.message_id == message_id {
+                        preview.image_path = local_path.clone();
+                        preview.original_path = Some(local_path);
+                        preview.loading_original = false;
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ImageOriginalFailed {
+            message_id,
+            error,
+        } => {
+            tracing::warn!("下载原图失败 message_id={}: {:?}", message_id, error);
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(preview) = &mut chat.image_preview {
+                    if preview.message_id == message_id {
+                        preview.loading_original = false;
+                        // 保持显示缩略图
+                    }
+                }
             }
             Task::none()
         }
@@ -1928,7 +2047,7 @@ pub fn update(
 
         AppMessage::CloseImagePreview => {
             if let Some(chat) = &mut state.active_chat {
-                chat.preview_image_path = None;
+                chat.image_preview = None;
             }
             Task::none()
         }
@@ -2410,7 +2529,7 @@ fn handle_conversation_selected(
         unread_marker: UnreadMarkerVm::default(),
         typing_hint: None,
         typing_user_id: None,
-        preview_image_path: None,
+        image_preview: None,
         attachment_menu: None,
         user_profile_panel: None,
     });
@@ -4809,7 +4928,7 @@ mod tests {
             unread_marker: UnreadMarkerVm::default(),
             typing_hint: None,
             typing_user_id: None,
-            preview_image_path: None,
+            image_preview: None,
             attachment_menu: None,
         });
         state

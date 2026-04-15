@@ -530,7 +530,7 @@ impl PrivchatSdkBridge {
                 routes::account_user::DETAIL,
                 &AccountUserDetailRequest {
                     target_user_id: user_id,
-                    source: "session_title_repair".to_string(),
+                    source: DetailSourceType::Friend.as_str().to_string(),
                     source_id: user_id.to_string(),
                     user_id: 0,
                 },

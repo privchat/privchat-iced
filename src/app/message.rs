@@ -281,7 +281,24 @@ pub enum AppMessage {
     ComposerAttachmentSendCanceled,
     OpenImagePreview {
         message_id: u64,
+        /// 原图本地路径（可能不存在）
+        original_path: Option<String>,
+        /// 缩略图本地路径
+        thumbnail_path: Option<String>,
+        /// 远程 URL（用于下载）
+        media_url: Option<String>,
+        /// 文件 ID（用于获取下载链接）
+        file_id: Option<u64>,
+        /// 消息创建时间（用于构建缓存路径）
+        created_at: i64,
+    },
+    ImageOriginalReady {
+        message_id: u64,
         local_path: String,
+    },
+    ImageOriginalFailed {
+        message_id: u64,
+        error: UiError,
     },
     OpenAttachment {
         message_id: u64,

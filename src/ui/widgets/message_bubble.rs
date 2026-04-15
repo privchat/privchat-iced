@@ -132,12 +132,13 @@ pub fn view<'a>(
             };
             button(preview)
                 .style(navless_button_style)
-                .on_press(AppMessage::OpenAttachment {
+                .on_press(AppMessage::OpenImagePreview {
                     message_id: message.message_id,
-                    created_at: message.created_at,
-                    local_path: message.media_local_path.clone(),
+                    original_path: message.media_local_path.clone(),
+                    thumbnail_path: message.local_thumbnail_path.clone(),
+                    media_url: message.media_url.clone(),
                     file_id: message.media_file_id,
-                    filename: Some(message.body.clone()),
+                    created_at: message.created_at,
                 })
                 .into()
         } else if message.local_thumbnail_path.is_some()
