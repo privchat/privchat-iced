@@ -441,6 +441,13 @@ pub fn update(
 
         AppMessage::WindowCloseRequested { window_id } => {
             if state.main_window_id == Some(window_id) {
+                // daemon mode does not auto-exit when all windows close;
+                // schedule a hard exit after giving iced::exit() a moment
+                // to flush state, so the process never lingers.
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::process::exit(0);
+                });
                 return iced::exit();
             }
             if state.add_friend_search_window_id == Some(window_id) {
