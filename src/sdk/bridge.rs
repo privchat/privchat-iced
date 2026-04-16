@@ -214,6 +214,7 @@ pub trait SdkBridge: Send + Sync + 'static {
         channel_id: u64,
         fallback_name: Option<String>,
     ) -> Result<AddFriendDetailVm, UiError>;
+    async fn set_friend_alias(&self, user_id: u64, alias: String) -> Result<bool, UiError>;
     async fn get_or_create_direct_channel(
         &self,
         target_user_id: u64,
@@ -1300,6 +1301,29 @@ impl SdkBridge for PrivchatSdkBridge {
             }
         }
         Ok(detail)
+    }
+
+    async fn set_friend_alias(&self, user_id: u64, alias: String) -> Result<bool, UiError> {
+        use privchat_protocol::rpc::contact::friend::{FriendSetAliasRequest, FriendSetAliasResponse};
+        let alias_opt = if alias.is_empty() { None } else { Some(alias.clone()) };
+        let result: FriendSetAliasResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::friend::SET_ALIAS,
+                &FriendSetAliasRequest {
+                    user_id,
+                    alias: alias_opt.clone(),
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if result {
+            self.sdk
+                .update_user_alias(user_id, alias_opt)
+                .await
+                .map_err(map_sdk_error)?;
+        }
+        Ok(result)
     }
 
     async fn get_or_create_direct_channel(

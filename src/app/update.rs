@@ -2225,6 +2225,9 @@ pub fn update(
                     loading: true,
                     detail: None,
                     error: None,
+                    editing_alias: false,
+                    alias_input: String::new(),
+                    alias_old_title: None,
                 });
             }
             let bridge = bridge.clone();
@@ -2265,6 +2268,110 @@ pub fn update(
             if let Some(chat) = &mut state.active_chat {
                 chat.user_profile_panel = None;
             }
+            Task::none()
+        }
+
+        AppMessage::StartEditAlias => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    // Pre-fill with current title (display name)
+                    let current = panel
+                        .detail
+                        .as_ref()
+                        .map(|d| d.title.clone())
+                        .unwrap_or_default();
+                    panel.alias_input = current;
+                    panel.editing_alias = true;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::AliasInputChanged(value) => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    panel.alias_input = value;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::CancelEditAlias => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    panel.editing_alias = false;
+                    panel.alias_input.clear();
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ConfirmEditAlias => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    let alias = panel.alias_input.trim().to_string();
+                    let user_id = panel.user_id;
+                    panel.editing_alias = false;
+                    panel.error = None;
+                    // Save old title for rollback on failure
+                    panel.alias_old_title = panel.detail.as_ref().map(|d| d.title.clone());
+                    // Optimistic update
+                    if !alias.is_empty() {
+                        if let Some(detail) = &mut panel.detail {
+                            detail.title = alias.clone();
+                        }
+                    }
+                    let bridge = bridge.clone();
+                    let alias_clone = alias.clone();
+                    return Task::perform(
+                        async move { bridge.set_friend_alias(user_id, alias).await },
+                        move |result| match result {
+                            Ok(success) => AppMessage::AliasSetResult { success, alias: alias_clone.clone() },
+                            Err(_) => AppMessage::AliasSetResult { success: false, alias: alias_clone.clone() },
+                        },
+                    );
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::AliasSetResult { success, alias } => {
+            // Collect info needed for session list update before borrowing active_chat
+            let mut update_session: Option<(u64, i32, String)> = None;
+
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(panel) = &mut chat.user_profile_panel {
+                    if !success {
+                        // Rollback profile card title
+                        if let Some(old_title) = panel.alias_old_title.take() {
+                            if let Some(detail) = &mut panel.detail {
+                                detail.title = old_title;
+                            }
+                        }
+                        panel.error = Some("设置失败，请稍后再试。".to_string());
+                    } else {
+                        panel.alias_old_title = None;
+                        let new_title = if alias.is_empty() {
+                            panel.detail.as_ref().map(|d| d.title.clone()).unwrap_or_default()
+                        } else {
+                            alias
+                        };
+                        // Update chat header title
+                        chat.title = new_title.clone();
+                        update_session = Some((chat.channel_id, chat.channel_type, new_title));
+                    }
+                }
+            }
+
+            // Update session list title
+            if let Some((channel_id, channel_type, new_title)) = update_session {
+                if let Some(item) = state.session_list.items.iter_mut().find(|item| {
+                    item.channel_id == channel_id && item.channel_type == channel_type
+                }) {
+                    item.title = new_title;
+                }
+            }
+
             Task::none()
         }
 

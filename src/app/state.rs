@@ -293,6 +293,9 @@ pub struct UserProfilePanelState {
     pub loading: bool,
     pub detail: Option<crate::presentation::vm::AddFriendDetailVm>,
     pub error: Option<String>,
+    pub editing_alias: bool,
+    pub alias_input: String,
+    pub alias_old_title: Option<String>,
 }
 
 #[derive(Debug, Clone)]

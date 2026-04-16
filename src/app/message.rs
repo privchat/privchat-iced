@@ -380,6 +380,11 @@ pub enum AppMessage {
         error: UiError,
     },
     CloseUserProfile,
+    StartEditAlias,
+    AliasInputChanged(String),
+    ConfirmEditAlias,
+    CancelEditAlias,
+    AliasSetResult { success: bool, alias: String },
     MediaThumbnailDownloaded {
         message_id: u64,
         local_path: String,

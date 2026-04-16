@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text};
+use iced::widget::{button, column, container, image, mouse_area, row, scrollable, stack, text, text_input};
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
@@ -330,15 +330,98 @@ fn user_profile_card<'a>(
         .align_x(alignment::Horizontal::Center)
         .into()
     } else if let Some(detail) = &panel.detail {
+        let title_row: Element<'_, AppMessage> = if panel.editing_alias {
+            let input_field = text_input("输入备注名...", &panel.alias_input)
+                .on_input(AppMessage::AliasInputChanged)
+                .on_submit(AppMessage::ConfirmEditAlias)
+                .size(16)
+                .padding([4, 8])
+                .style(|_theme, _status| text_input::Style {
+                    background: Background::Color(Color::from_rgb8(0x1A, 0x1E, 0x24)),
+                    border: border::width(1.0)
+                        .rounded(6.0)
+                        .color(Color::from_rgb8(0x3B, 0x41, 0x49)),
+                    icon: Color::from_rgb8(0x8E, 0x96, 0xA0),
+                    placeholder: Color::from_rgb8(0x7F, 0x87, 0x91),
+                    value: Color::from_rgb8(0xE0, 0xE4, 0xEA),
+                    selection: Color::from_rgb8(0x49, 0x91, 0x6A),
+                });
+            let confirm_btn = button(text("确定").size(12).color(Color::WHITE))
+                .padding([4, 10])
+                .on_press(AppMessage::ConfirmEditAlias)
+                .style(|_theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => {
+                            Color::from_rgb8(0xC9, 0x72, 0x14)
+                        }
+                        _ => Color::from_rgb8(0xDF, 0x84, 0x1C),
+                    };
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Color::WHITE,
+                        border: border::rounded(6.0),
+                        shadow: Default::default(),
+                        snap: true,
+                    }
+                });
+            let cancel_btn = button(text("取消").size(12).color(C_CARD_FIELD_LABEL))
+                .padding([4, 10])
+                .on_press(AppMessage::CancelEditAlias)
+                .style(|_theme, _status| button::Style {
+                    background: None,
+                    ..button::Style::default()
+                });
+            column![
+                input_field,
+                row![cancel_btn, confirm_btn].spacing(8),
+            ]
+            .spacing(6)
+            .into()
+        } else {
+            row![
+                text(&detail.title)
+                    .size(18)
+                    .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+                button(text("修改备注").size(12).color(Color::from_rgb8(0xDF, 0x84, 0x1C)))
+                    .padding([2, 8])
+                    .on_press(AppMessage::StartEditAlias)
+                    .style(|_theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered | button::Status::Pressed => {
+                                Color::from_rgb8(0x2A, 0x2E, 0x35)
+                            }
+                            _ => Color::TRANSPARENT,
+                        };
+                        button::Style {
+                            background: Some(Background::Color(bg)),
+                            text_color: Color::from_rgb8(0xDF, 0x84, 0x1C),
+                            border: border::rounded(4.0),
+                            shadow: Default::default(),
+                            snap: true,
+                        }
+                    }),
+            ]
+            .spacing(10)
+            .align_y(alignment::Vertical::Center)
+            .into()
+        };
+
         let mut items = column![
-            text(&detail.title)
-                .size(18)
-                .color(Color::from_rgb8(0xF0, 0xF2, 0xF4)),
+            title_row,
             text(&detail.subtitle)
                 .size(13)
                 .color(C_CARD_FIELD_LABEL),
         ]
         .spacing(6);
+
+        // Show inline error (e.g. alias set failed)
+        if let Some(err) = &panel.error {
+            items = items.push(
+                text(err)
+                    .size(12)
+                    .color(Color::from_rgb8(0xEA, 0x5E, 0x5E)),
+            );
+        }
 
         // separator
         items = items.push(
