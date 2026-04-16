@@ -144,6 +144,7 @@ pub enum AppMessage {
     MainWindowOpened {
         window_id: window::Id,
     },
+    ActivateMainWindow,
     AddFriendSearchWindowOpened {
         window_id: window::Id,
     },

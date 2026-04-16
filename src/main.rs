@@ -7,6 +7,12 @@ mod ui;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use std::fs::File;
+use fs2::FileExt;
+
+/// Holds the file lock for the entire process lifetime.
+/// Stored as a static to ensure it's never dropped before exit.
+static INSTANCE_LOCK: std::sync::OnceLock<File> = std::sync::OnceLock::new();
 
 use iced::{window, Element, Font, Size, Subscription, Task};
 use tracing_subscriber::EnvFilter;
@@ -210,6 +216,31 @@ fn main_window_settings() -> window::Settings {
 }
 
 fn main() -> anyhow::Result<()> {
+    // 单实例守卫：通过文件排他锁 + UDS 实现。
+    // 如果已有实例在运行，通知它激活主窗口，然后退出。
+    let lock_path = {
+        let data_dir = std::env::var("PRIVCHAT_DATA_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                std::path::PathBuf::from(home).join(".privchat-rust")
+            });
+        std::fs::create_dir_all(&data_dir).ok();
+        data_dir.join("privchat.lock")
+    };
+    let lock_file = File::create(&lock_path)?;
+    if lock_file.try_lock_exclusive().is_err() {
+        // 已有实例在运行，通知它激活窗口
+        if app::single_instance::try_activate_existing() {
+            eprintln!("PrivChat 已在运行，已激活现有窗口。");
+        } else {
+            eprintln!("PrivChat 已在运行中。");
+        }
+        std::process::exit(0);
+    }
+    // 将锁存入 static，确保进程退出前不会释放
+    let _ = INSTANCE_LOCK.set(lock_file);
+
     // 配置日志过滤器：默认过滤掉高频低价值日志
     // 可通过 RUST_LOG 环境变量覆盖
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {

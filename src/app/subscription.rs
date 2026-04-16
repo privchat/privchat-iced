@@ -73,6 +73,7 @@ pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscripti
     let mut subscriptions = vec![
         event::listen_with(map_global_event),
         window::close_requests().map(|window_id| AppMessage::WindowCloseRequested { window_id }),
+        super::single_instance::listen(),
     ];
 
     let should_poll_presence = state.auth.user_id.is_some()

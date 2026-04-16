@@ -401,6 +401,14 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::ActivateMainWindow => {
+            if let Some(id) = state.main_window_id {
+                window::gain_focus(id)
+            } else {
+                Task::none()
+            }
+        }
+
         AppMessage::AddFriendSearchWindowOpened { window_id } => {
             state.add_friend_search_window_id = Some(window_id);
             Task::none()
