@@ -386,6 +386,21 @@ impl PrivchatSdkBridge {
         Ok(snapshot.map(|s| s.user_id))
     }
 
+    /// 快捷消息文件路径: {data_dir}/users/{uid}/quick_phrases.json
+    async fn quick_phrases_path(&self) -> Result<std::path::PathBuf, UiError> {
+        let uid = self.current_uid().await?
+            .ok_or_else(|| UiError::Unknown("未登录，无法加载常用语".to_string()))?;
+        let data_dir = std::env::var("PRIVCHAT_DATA_DIR")
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.privchat-rust", home)
+            });
+        Ok(std::path::PathBuf::from(data_dir)
+            .join("users")
+            .join(uid.to_string())
+            .join("quick_phrases.json"))
+    }
+
     async fn apply_revoke_flag_to_vm(&self, message: &mut MessageVm) -> Result<(), UiError> {
         if message.is_deleted {
             return Ok(());
@@ -1930,25 +1945,25 @@ impl SdkBridge for PrivchatSdkBridge {
     }
 
     async fn load_quick_phrases(&self) -> Result<Vec<String>, UiError> {
-        let data = self
-            .sdk
-            .kv_get_local("quick_phrases".to_string())
-            .await
-            .map_err(map_sdk_error)?;
-        match data {
-            Some(bytes) => serde_json::from_slice(&bytes)
+        let path = self.quick_phrases_path().await?;
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => serde_json::from_slice(&bytes)
                 .map_err(|e| UiError::Unknown(format!("解析常用语失败: {e}"))),
-            None => Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(e) => Err(UiError::Unknown(format!("读取常用语失败: {e}"))),
         }
     }
 
     async fn save_quick_phrases(&self, phrases: &[String]) -> Result<(), UiError> {
-        let bytes = serde_json::to_vec(phrases)
+        let path = self.quick_phrases_path().await?;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await
+                .map_err(|e| UiError::Unknown(format!("创建用户目录失败: {e}")))?;
+        }
+        let bytes = serde_json::to_vec_pretty(phrases)
             .map_err(|e| UiError::Unknown(format!("序列化常用语失败: {e}")))?;
-        self.sdk
-            .kv_put_local("quick_phrases".to_string(), bytes)
-            .await
-            .map_err(map_sdk_error)?;
+        tokio::fs::write(&path, bytes).await
+            .map_err(|e| UiError::Unknown(format!("保存常用语失败: {e}")))?;
         Ok(())
     }
 }

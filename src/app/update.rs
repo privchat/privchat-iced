@@ -1555,6 +1555,11 @@ pub fn update(
                     chat.composer.draft = phrase;
                     chat.composer.editor =
                         iced::widget::text_editor::Content::with_text(&chat.composer.draft);
+                    chat.composer.editor.perform(
+                        iced::widget::text_editor::Action::Move(
+                            iced::widget::text_editor::Motion::DocumentEnd,
+                        ),
+                    );
                     chat.composer.quick_phrase_open = false;
                     return iced::widget::operation::focus("chat-composer-editor");
                 }
