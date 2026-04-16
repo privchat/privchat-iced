@@ -282,6 +282,12 @@ pub trait SdkBridge: Send + Sync + 'static {
 
     async fn get_file_url(&self, file_id: u64) -> Result<String, UiError>;
 
+    async fn get_peer_read_pts(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+    ) -> Result<Option<u64>, UiError>;
+
     fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent>;
 }
 
@@ -1846,6 +1852,7 @@ impl SdkBridge for PrivchatSdkBridge {
                     channel_id,
                     read_pts,
                     last_read_message_id: None,
+                    client_visible_pts: None,
                 },
             )
             .await
@@ -1872,6 +1879,17 @@ impl SdkBridge for PrivchatSdkBridge {
             .await
             .map_err(map_sdk_error)?;
         Ok(response.file_url)
+    }
+
+    async fn get_peer_read_pts(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+    ) -> Result<Option<u64>, UiError> {
+        self.sdk
+            .get_peer_read_pts(channel_id, channel_type)
+            .await
+            .map_err(map_sdk_error)
     }
 
     fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent> {

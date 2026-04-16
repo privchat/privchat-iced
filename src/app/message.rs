@@ -216,6 +216,7 @@ pub enum AppMessage {
         channel_type: i32,
         open_token: OpenToken,
         snapshot: TimelineSnapshotVm,
+        peer_read_pts: Option<u64>,
     },
     ConversationOpenFailed {
         channel_id: u64,
@@ -237,6 +238,17 @@ pub enum AppMessage {
     },
     PresenceChanged {
         presence: PresenceVm,
+    },
+    PeerReadPtsAdvanced {
+        channel_id: u64,
+        channel_type: i32,
+        reader_id: u64,
+        read_pts: u64,
+    },
+    MessageDelivered {
+        channel_id: u64,
+        channel_type: i32,
+        server_message_id: u64,
     },
     TypingStatusChanged {
         channel_id: u64,

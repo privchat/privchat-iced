@@ -11,20 +11,39 @@ const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
 const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
 
-fn send_state_label_zh(state: &MessageSendStateVm, read_hint: bool) -> &'static str {
-    match state {
-        MessageSendStateVm::Queued => "发送中",
-        MessageSendStateVm::Sending => "发送中",
-        MessageSendStateVm::Retrying => "发送中",
-        MessageSendStateVm::Sent => {
-            if read_hint {
-                "已读"
-            } else {
-                "已发送"
-            }
+fn resolve_outgoing_status(message: &MessageVm, peer_last_read_pts: Option<u64>) -> &'static str {
+    // 1. 已读：自己发的消息 pts <= 对方 read cursor
+    if let (Some(pts), Some(peer_pts)) = (message.pts, peer_last_read_pts) {
+        if pts <= peer_pts {
+            return "已读";
         }
-        MessageSendStateVm::FailedRetryable { .. } => "发送失败",
-        MessageSendStateVm::FailedPermanent { .. } => "发送失败",
+    }
+    // 2. 已送达：对端在线 session 已 ack
+    if message.delivered {
+        return "已送达";
+    }
+    // 3. 已发送：有 server_message_id 说明服务端已确认
+    if message.server_message_id.is_some() {
+        return "已发送";
+    }
+    // 4. 根据发送状态判断
+    match &message.send_state {
+        Some(MessageSendStateVm::Queued) => "待发送",
+        Some(MessageSendStateVm::Sending) => "发送中",
+        Some(MessageSendStateVm::Retrying) => "发送中",
+        Some(MessageSendStateVm::Sent) => "已发送",
+        Some(MessageSendStateVm::FailedRetryable { .. }) => "发送失败",
+        Some(MessageSendStateVm::FailedPermanent { .. }) => "发送失败",
+        None => "已发送",
+    }
+}
+
+fn status_color(label: &str) -> Color {
+    match label {
+        "已读" => Color::from_rgba8(0x07, 0x7C, 0x3A, 0.85),
+        "已送达" => Color::from_rgba8(0x1A, 0x6B, 0x9C, 0.85),
+        "发送失败" => Color::from_rgba8(0xCC, 0x33, 0x33, 0.85),
+        _ => Color::from_rgba8(0x1A, 0x20, 0x18, 0.70),
     }
 }
 
@@ -34,6 +53,7 @@ pub fn view<'a>(
     opened_menu_message_id: Option<u64>,
     render_media_preview: bool,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
+    peer_last_read_pts: Option<u64>,
 ) -> Element<'a, AppMessage> {
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
@@ -50,17 +70,7 @@ pub fn view<'a>(
     let footer: Option<Element<'_, AppMessage>> = if message.is_deleted {
         None
     } else if message.is_own {
-        // Any message resolved to a server id should be displayed as sent.
-        // This avoids stale local failure labels after eventual queue success.
-        let status_label = if message.server_message_id.is_some() {
-            "已发送"
-        } else {
-            message
-                .send_state
-                .as_ref()
-                .map(|state| send_state_label_zh(state, message.pts.is_some()))
-                .unwrap_or("已发送")
-        };
+        let status_label = resolve_outgoing_status(message, peer_last_read_pts);
 
         Some(
             container(
@@ -70,7 +80,7 @@ pub fn view<'a>(
                         .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
                     text(status_label)
                         .size(11)
-                        .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.70)),
+                        .color(status_color(status_label)),
                 ]
                 .spacing(8),
             )

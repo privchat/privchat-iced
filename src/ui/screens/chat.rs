@@ -86,6 +86,7 @@ pub fn view<'a>(
                 &chat.timeline,
                 chat.attachment_menu.as_ref().map(|m| m.message_id),
                 image_cache,
+                chat.peer_last_read_pts,
             ),
         ]
         .height(Length::Fill),

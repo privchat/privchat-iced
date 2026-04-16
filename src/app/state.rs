@@ -272,6 +272,7 @@ pub struct ChatScreenState {
     pub typing_hint: Option<String>,
     /// 记录当前正在输入的用户 ID，用于在收到该用户消息时精确清除气泡
     pub typing_user_id: Option<u64>,
+    pub peer_last_read_pts: Option<u64>,
     pub attachment_menu: Option<AttachmentMenuState>,
     pub user_profile_panel: Option<UserProfilePanelState>,
 }

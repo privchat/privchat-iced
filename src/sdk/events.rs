@@ -107,6 +107,8 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::OutboundQueueUpdated { .. } => "outbound_queue_updated",
         SdkEvent::TimelineUpdated { .. } => "timeline_updated",
         SdkEvent::MessageSendStatusChanged { .. } => "message_send_status_changed",
+        SdkEvent::PeerReadPtsAdvanced { .. } => "peer_read_pts_advanced",
+        SdkEvent::MessageDelivered { .. } => "message_delivered",
         SdkEvent::TypingSent { .. } => "typing_sent",
         SdkEvent::SubscriptionMessageReceived { .. } => "subscription_message_received",
         SdkEvent::ShutdownStarted => "shutdown_started",
@@ -338,6 +340,39 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
                     source: MessageIngressSource::OutboundQueueUpdated,
                 },
                 None => AppMessage::Noop,
+            }
+        }
+        SdkEvent::PeerReadPtsAdvanced {
+            channel_id,
+            channel_type,
+            reader_id,
+            read_pts,
+        } => {
+            info!(
+                "sdk_event: peer_read_pts_advanced channel_id={} channel_type={} reader_id={} read_pts={}",
+                channel_id, channel_type, reader_id, read_pts
+            );
+            AppMessage::PeerReadPtsAdvanced {
+                channel_id,
+                channel_type,
+                reader_id,
+                read_pts,
+            }
+        }
+        SdkEvent::MessageDelivered {
+            channel_id,
+            channel_type,
+            server_message_id,
+            ..
+        } => {
+            info!(
+                "sdk_event: message_delivered channel_id={} server_message_id={}",
+                channel_id, server_message_id
+            );
+            AppMessage::MessageDelivered {
+                channel_id,
+                channel_type,
+                server_message_id,
             }
         }
         SdkEvent::SubscriptionMessageReceived {

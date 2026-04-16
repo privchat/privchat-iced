@@ -21,7 +21,7 @@ use crate::app::state::{
 use crate::audio;
 use crate::presentation::vm::{
     AddFriendSelectionVm, ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey,
-    TimelinePatchVm, UnreadMarkerVm,
+    TimelinePatchVm, UiError, UnreadMarkerVm,
 };
 use crate::sdk::bridge::SdkBridge;
 use crate::sdk::events;
@@ -774,6 +774,7 @@ pub fn update(
             channel_type,
             open_token,
             snapshot,
+            peer_read_pts,
         } => {
             if !pass_dual_guard(state, channel_id, channel_type, open_token) {
                 return Task::none();
@@ -807,6 +808,13 @@ pub fn update(
                         chat.channel_id,
                         chat.channel_type,
                         chat.peer_user_id
+                    );
+                }
+                if let Some(pts) = peer_read_pts {
+                    chat.peer_last_read_pts = Some(pts);
+                    tracing::info!(
+                        "cold_start.peer_read_pts: channel_id={} peer_read_pts={}",
+                        channel_id, pts
                     );
                 }
             }
@@ -1044,6 +1052,48 @@ pub fn update(
             );
             state.presences.insert(presence.user_id, presence.clone());
             apply_presence_to_friend_items(state);
+            Task::none()
+        }
+
+        AppMessage::PeerReadPtsAdvanced {
+            channel_id,
+            channel_type: _,
+            reader_id: _,
+            read_pts,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id {
+                    let old_pts = chat.peer_last_read_pts;
+                    let new_pts = old_pts.unwrap_or(0).max(read_pts);
+                    chat.peer_last_read_pts = Some(new_pts);
+                    tracing::info!(
+                        "peer_read_pts_advanced: channel_id={} event_pts={} old={:?} -> new={}",
+                        channel_id, read_pts, old_pts, new_pts
+                    );
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::MessageDelivered {
+            channel_id,
+            channel_type: _,
+            server_message_id,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id {
+                    for msg in &mut chat.timeline.items {
+                        if msg.server_message_id == Some(server_message_id) {
+                            msg.delivered = true;
+                            tracing::info!(
+                                "message_delivered: channel_id={} server_message_id={}",
+                                channel_id, server_message_id
+                            );
+                            break;
+                        }
+                    }
+                }
+            }
             Task::none()
         }
 
@@ -2517,6 +2567,7 @@ fn handle_conversation_selected(
         typing_hint: None,
         typing_user_id: None,
 
+        peer_last_read_pts: None,
         attachment_menu: None,
         user_profile_panel: None,
     });
@@ -2524,19 +2575,26 @@ fn handle_conversation_selected(
 
     // open_timeline reads from local SQLite — must complete first, unblocked by network calls.
     // subscribe_channel and presence fetch both require network; they run after ConversationOpened.
+    // Also fetch peer_read_pts for cold start display of "已读" status.
     let timeline_bridge = Arc::clone(bridge);
     Task::perform(
         async move {
-            timeline_bridge
+            let snapshot = timeline_bridge
                 .open_timeline(channel_id, channel_type)
+                .await?;
+            let peer_read_pts = timeline_bridge
+                .get_peer_read_pts(channel_id, channel_type)
                 .await
+                .unwrap_or(None);
+            Ok((snapshot, peer_read_pts))
         },
-        move |result| match result {
-            Ok(snapshot) => AppMessage::ConversationOpened {
+        move |result: Result<_, UiError>| match result {
+            Ok((snapshot, peer_read_pts)) => AppMessage::ConversationOpened {
                 channel_id,
                 channel_type,
                 open_token,
                 snapshot,
+                peer_read_pts,
             },
             Err(error) => AppMessage::ConversationOpenFailed {
                 channel_id,
@@ -3117,6 +3175,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             send_state: Some(MessageSendStateVm::Sending),
             is_own: true,
             is_deleted: false,
+            delivered: false,
         };
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
@@ -3272,6 +3331,7 @@ fn handle_send_attachment_path(
             send_state: Some(MessageSendStateVm::Sending),
             is_own: true,
             is_deleted: false,
+            delivered: false,
         };
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
@@ -4925,6 +4985,14 @@ mod tests {
             Err(UiError::Unknown("unused".to_string()))
         }
 
+        async fn get_peer_read_pts(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+        ) -> Result<Option<u64>, UiError> {
+            Ok(None)
+        }
+
         fn subscribe_timeline(&self, _session_epoch: u64) -> Subscription<SdkEvent> {
             Subscription::none()
         }
@@ -4947,7 +5015,8 @@ mod tests {
             typing_hint: None,
             typing_user_id: None,
     
-            attachment_menu: None,
+            peer_last_read_pts: None,
+        attachment_menu: None,
         });
         state
     }
@@ -4973,6 +5042,7 @@ mod tests {
             send_state: Some(MessageSendStateVm::Queued),
             is_own: true,
             is_deleted: false,
+            delivered: false,
         }
     }
 
@@ -5003,6 +5073,7 @@ mod tests {
             send_state: None,
             is_own: false,
             is_deleted: false,
+            delivered: false,
         }
     }
 
@@ -5128,6 +5199,7 @@ mod tests {
             send_state: None,
             is_own: false,
             is_deleted: false,
+            delivered: false,
         };
 
         let _ = update(
@@ -5176,6 +5248,7 @@ mod tests {
             send_state: None,
             is_own: false,
             is_deleted: false,
+            delivered: false,
         };
 
         let _ = update(

@@ -148,6 +148,7 @@ pub struct MessageVm {
     pub send_state: Option<MessageSendStateVm>,
     pub is_own: bool,
     pub is_deleted: bool,
+    pub delivered: bool,
 }
 
 #[derive(Debug, Clone, Default)]

@@ -584,10 +584,11 @@ pub fn map_stored_message_to_vm(
         local_thumbnail_path,
         media_file_size,
         created_at: message.created_at,
-        pts: extract_pts(&message.extra),
+        pts: message.pts.or_else(|| extract_pts(&message.extra)),
         send_state,
         is_own,
         is_deleted: extract_revoked(&message.content, &message.extra),
+        delivered: message.delivered,
     }
 }
 
