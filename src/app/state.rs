@@ -169,6 +169,10 @@ pub struct ComposerState {
     pub sending_disabled: bool,
     pub editor: text_editor::Content,
     pub emoji_picker_open: bool,
+    pub quick_phrase_open: bool,
+    pub quick_phrases: Vec<String>,
+    pub quick_phrase_adding: bool,
+    pub quick_phrase_input: String,
     pub typing_active: bool,
     pub pending_attachment: Option<PendingAttachmentState>,
 }
@@ -179,6 +183,8 @@ impl std::fmt::Debug for ComposerState {
             .field("draft", &self.draft)
             .field("sending_disabled", &self.sending_disabled)
             .field("emoji_picker_open", &self.emoji_picker_open)
+            .field("quick_phrase_open", &self.quick_phrase_open)
+            .field("quick_phrases_count", &self.quick_phrases.len())
             .field("typing_active", &self.typing_active)
             .field("pending_attachment", &self.pending_attachment)
             .finish()
@@ -192,6 +198,10 @@ impl Default for ComposerState {
             sending_disabled: false,
             editor: text_editor::Content::new(),
             emoji_picker_open: false,
+            quick_phrase_open: false,
+            quick_phrases: Vec::new(),
+            quick_phrase_adding: false,
+            quick_phrase_input: String::new(),
             typing_active: false,
             pending_attachment: None,
         }

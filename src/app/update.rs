@@ -1507,6 +1507,7 @@ pub fn update(
         AppMessage::ToggleEmojiPicker => {
             if let Some(chat) = &mut state.active_chat {
                 chat.composer.emoji_picker_open = !chat.composer.emoji_picker_open;
+                chat.composer.quick_phrase_open = false;
             }
             Task::none()
         }
@@ -1518,6 +1519,122 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::ToggleQuickPhrase => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrase_open = !chat.composer.quick_phrase_open;
+                chat.composer.emoji_picker_open = false;
+                if chat.composer.quick_phrase_open {
+                    // Load phrases from local store
+                    let bridge = bridge.clone();
+                    return Task::perform(
+                        async move { bridge.load_quick_phrases().await.unwrap_or_default() },
+                        |phrases| AppMessage::QuickPhrasesLoaded { phrases },
+                    );
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::DismissQuickPhrase => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrase_open = false;
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhrasesLoaded { phrases } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrases = phrases;
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhrasePicked { index } => {
+            if let Some(chat) = &mut state.active_chat {
+                if let Some(phrase) = chat.composer.quick_phrases.get(index).cloned() {
+                    chat.composer.draft = phrase;
+                    chat.composer.editor =
+                        iced::widget::text_editor::Content::with_text(&chat.composer.draft);
+                    chat.composer.quick_phrase_open = false;
+                    return iced::widget::operation::focus("chat-composer-editor");
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhraseDelete { index } => {
+            if let Some(chat) = &mut state.active_chat {
+                if index < chat.composer.quick_phrases.len() {
+                    chat.composer.quick_phrases.remove(index);
+                    let phrases = chat.composer.quick_phrases.clone();
+                    let bridge = bridge.clone();
+                    return Task::perform(
+                        async move { bridge.save_quick_phrases(&phrases).await },
+                        |_| AppMessage::Noop,
+                    );
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::OpenAddQuickPhrase => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrase_adding = true;
+                chat.composer.quick_phrase_input = String::new();
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhraseInputChanged(value) => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrase_input = value;
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhraseConfirmAdd => {
+            if let Some(chat) = &mut state.active_chat {
+                let input = chat.composer.quick_phrase_input.trim().to_string();
+                if !input.is_empty() {
+                    chat.composer.quick_phrases.push(input);
+                    let phrases = chat.composer.quick_phrases.clone();
+                    let bridge = bridge.clone();
+                    chat.composer.quick_phrase_adding = false;
+                    chat.composer.quick_phrase_input.clear();
+                    return Task::perform(
+                        async move { bridge.save_quick_phrases(&phrases).await },
+                        |_| AppMessage::Noop,
+                    );
+                }
+                chat.composer.quick_phrase_adding = false;
+                chat.composer.quick_phrase_input.clear();
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhraseCancelAdd => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.quick_phrase_adding = false;
+                chat.composer.quick_phrase_input.clear();
+            }
+            Task::none()
+        }
+
+        AppMessage::QuickPhraseAdded { phrase } => {
+            if let Some(chat) = &mut state.active_chat {
+                if !phrase.trim().is_empty() {
+                    chat.composer.quick_phrases.push(phrase);
+                    let phrases = chat.composer.quick_phrases.clone();
+                    let bridge = bridge.clone();
+                    return Task::perform(
+                        async move { bridge.save_quick_phrases(&phrases).await },
+                        |_| AppMessage::Noop,
+                    );
+                }
+            }
+            Task::none()
+        }
+
         AppMessage::EmojiPicked { emoji } => {
             if let Some(chat) = &mut state.active_chat {
                 let was_typing = chat.composer.typing_active;
@@ -1525,6 +1642,7 @@ pub fn update(
                 chat.composer.editor =
                     iced::widget::text_editor::Content::with_text(&chat.composer.draft);
                 chat.composer.emoji_picker_open = false;
+                chat.composer.quick_phrase_open = false;
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
                 if was_typing != is_typing {
@@ -3190,6 +3308,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         chat.composer.draft.clear();
         chat.composer.editor = iced::widget::text_editor::Content::new();
         chat.composer.emoji_picker_open = false;
+        chat.composer.quick_phrase_open = false;
         chat.composer.typing_active = false;
     }
     touch_session_preview(state, channel_id, channel_type, &body, now);
@@ -3344,6 +3463,7 @@ fn handle_send_attachment_path(
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
         chat.composer.emoji_picker_open = false;
+        chat.composer.quick_phrase_open = false;
         chat.composer.typing_active = false;
     }
     touch_session_preview(state, channel_id, channel_type, &preview, now);

@@ -18,6 +18,7 @@ static ICON_SMILE: &[u8] = br#"<svg viewBox='0 0 24 24' fill='none' xmlns='http:
 static ICON_FOLDER: &[u8] = br#"<svg viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'><path d='M3.8 8.3c0-1 .8-1.8 1.8-1.8h4.1l1.4 1.5h7.3c1 0 1.8.8 1.8 1.8v7.4c0 1-.8 1.8-1.8 1.8H5.6c-1 0-1.8-.8-1.8-1.8V8.3Z' stroke='currentColor' stroke-width='1.6' stroke-linejoin='round'/></svg>"#;
 static ICON_SCISSORS: &[u8] = br#"<svg viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'><circle cx='6.6' cy='7.2' r='2.1' stroke='currentColor' stroke-width='1.5'/><circle cx='6.6' cy='16.8' r='2.1' stroke='currentColor' stroke-width='1.5'/><path d='M20 5.8 9 12l11 6.2M11 10.9l-1.8-1' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>"#;
 static ICON_IMAGE: &[u8] = br#"<svg viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'><rect x='4' y='5' width='16' height='14' rx='1.8' stroke='currentColor' stroke-width='1.6'/><path d='m7.5 15 2.8-2.8 2.2 2.2 2.5-2.5L18 15' stroke='currentColor' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/><circle cx='9' cy='9' r='1.1' fill='currentColor'/></svg>"#;
+static ICON_QUICK_PHRASE: &[u8] = br#"<svg viewBox='0 0 24 24' fill='none' xmlns='http://www.w3.org/2000/svg'><rect x='4' y='4' width='16' height='16' rx='2' stroke='currentColor' stroke-width='1.6'/><path d='M8 9h8M8 12.5h5' stroke='currentColor' stroke-width='1.6' stroke-linecap='round'/><path d='M15 15.5l1.5 1.5 3-3' stroke='currentColor' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/></svg>"#;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Icon {
@@ -38,6 +39,7 @@ pub enum Icon {
     Folder,
     Scissors,
     Image,
+    QuickPhrase,
 }
 
 pub fn render(icon: Icon, size: f32, color: Color) -> Svg<'static, Theme> {
@@ -59,6 +61,7 @@ pub fn render(icon: Icon, size: f32, color: Color) -> Svg<'static, Theme> {
         Icon::Folder => ICON_FOLDER,
         Icon::Scissors => ICON_SCISSORS,
         Icon::Image => ICON_IMAGE,
+        Icon::QuickPhrase => ICON_QUICK_PHRASE,
     };
 
     svg(svg::Handle::from_memory(bytes))

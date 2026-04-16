@@ -1,4 +1,4 @@
-use iced::widget::{button, column, container, row, text, text_editor};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, text, text_editor, text_input};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
@@ -17,6 +17,7 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
 
     let toolbar = row![
         tool_button(Icon::Smile, Some(AppMessage::ToggleEmojiPicker)),
+        tool_button(Icon::QuickPhrase, Some(AppMessage::ToggleQuickPhrase)),
         tool_button(Icon::Image, Some(AppMessage::ComposerPickImagePressed)),
         tool_button(Icon::Folder, Some(AppMessage::ComposerPickFilePressed)),
     ]
@@ -176,6 +177,173 @@ fn emoji_button(emoji: &'static str) -> Element<'static, AppMessage> {
                 shadow: Default::default(),
                 snap: true,
             }
+        })
+        .into()
+}
+
+pub fn quick_phrase_popup<'a>(phrases: &'a [String], adding: bool, input: &'a str) -> Element<'a, AppMessage> {
+    let mut items: Vec<Element<'_, AppMessage>> = Vec::new();
+
+    for (i, phrase) in phrases.iter().enumerate() {
+        let label = if phrase.chars().count() > 20 {
+            let truncated: String = phrase.chars().take(20).collect();
+            format!("{}...", truncated)
+        } else {
+            phrase.clone()
+        };
+        let phrase_row = mouse_area(
+            container(
+                row![
+                    container(text(label).size(14).color(Color::from_rgb8(0xE0, 0xE4, 0xEA)))
+                        .width(Length::Fill),
+                    button(text("\u{00D7}").size(14).color(Color::from_rgb8(0x8E, 0x96, 0xA0)))
+                        .padding([2, 6])
+                        .on_press(AppMessage::QuickPhraseDelete { index: i })
+                        .style(|_theme, status| {
+                            let bg = match status {
+                                button::Status::Hovered | button::Status::Pressed => {
+                                    Color::from_rgb8(0x3A, 0x40, 0x48)
+                                }
+                                _ => Color::TRANSPARENT,
+                            };
+                            button::Style {
+                                background: Some(Background::Color(bg)),
+                                text_color: Color::from_rgb8(0x8E, 0x96, 0xA0),
+                                border: border::rounded(4.0),
+                                shadow: Default::default(),
+                                snap: true,
+                            }
+                        }),
+                ]
+                .spacing(4)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding([8, 12])
+            .width(Length::Fill)
+            .style(|_| container::Style::default()),
+        )
+        .on_press(AppMessage::QuickPhrasePicked { index: i });
+
+        items.push(phrase_row.into());
+    }
+
+    if adding {
+        // Inline input row for adding a new phrase
+        let input_field = text_input("输入常用消息...", input)
+            .on_input(AppMessage::QuickPhraseInputChanged)
+            .on_submit(AppMessage::QuickPhraseConfirmAdd)
+            .size(14)
+            .padding([6, 8])
+            .style(|_theme, _status| text_input::Style {
+                background: Background::Color(Color::from_rgb8(0x1A, 0x1E, 0x24)),
+                border: border::width(1.0)
+                    .rounded(6.0)
+                    .color(Color::from_rgb8(0x3B, 0x41, 0x49)),
+                icon: Color::from_rgb8(0x8E, 0x96, 0xA0),
+                placeholder: Color::from_rgb8(0x7F, 0x87, 0x91),
+                value: Color::from_rgb8(0xE0, 0xE4, 0xEA),
+                selection: Color::from_rgb8(0x49, 0x91, 0x6A),
+            });
+
+        let confirm_btn = button(text("确定").size(13).color(Color::WHITE))
+            .padding([5, 12])
+            .on_press(AppMessage::QuickPhraseConfirmAdd)
+            .style(|_theme, status| {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => {
+                        Color::from_rgb8(0xC9, 0x72, 0x14)
+                    }
+                    _ => Color::from_rgb8(0xDF, 0x84, 0x1C),
+                };
+                button::Style {
+                    background: Some(Background::Color(bg)),
+                    text_color: Color::WHITE,
+                    border: border::rounded(6.0),
+                    shadow: Default::default(),
+                    snap: true,
+                }
+            });
+
+        let cancel_btn = button(text("取消").size(13).color(Color::from_rgb8(0x8E, 0x96, 0xA0)))
+            .padding([5, 12])
+            .on_press(AppMessage::QuickPhraseCancelAdd)
+            .style(|_theme, status| {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => {
+                        Color::from_rgb8(0x2A, 0x2E, 0x35)
+                    }
+                    _ => Color::TRANSPARENT,
+                };
+                button::Style {
+                    background: Some(Background::Color(bg)),
+                    text_color: Color::from_rgb8(0x8E, 0x96, 0xA0),
+                    border: border::rounded(6.0),
+                    shadow: Default::default(),
+                    snap: true,
+                }
+            });
+
+        let input_row = container(
+            column![
+                input_field,
+                row![cancel_btn, confirm_btn]
+                    .spacing(8)
+                    .align_y(alignment::Vertical::Center),
+            ]
+            .spacing(8),
+        )
+        .padding([8, 12])
+        .width(Length::Fill);
+
+        items.push(input_row.into());
+    } else {
+        // "添加常用消息" button at the bottom
+        let add_button = button(
+            row![
+                icons::render(Icon::Plus, 16.0, Color::from_rgb8(0xDF, 0x84, 0x1C)),
+                text("添加常用消息").size(14).color(Color::from_rgb8(0xDF, 0x84, 0x1C)),
+            ]
+            .spacing(6)
+            .align_y(alignment::Vertical::Center),
+        )
+        .padding([8, 12])
+        .width(Length::Fill)
+        .on_press(AppMessage::OpenAddQuickPhrase)
+        .style(|_theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Color::from_rgb8(0x2A, 0x2E, 0x35)
+                }
+                _ => Color::TRANSPARENT,
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: Color::from_rgb8(0xDF, 0x84, 0x1C),
+                border: border::rounded(0.0),
+                shadow: Default::default(),
+                snap: true,
+            }
+        });
+        items.push(add_button.into());
+    }
+
+    let list = scrollable(column(items).width(Length::Fill))
+        .height(Length::Shrink);
+
+    container(list)
+        .width(Length::Fixed(320.0))
+        .max_height(300.0)
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x22, 0x26, 0x2D))),
+            border: border::width(1.0)
+                .rounded(8.0)
+                .color(Color::from_rgb8(0x3B, 0x41, 0x49)),
+            shadow: iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.35),
+                offset: iced::Vector::new(0.0, 3.0),
+                blur_radius: 10.0,
+            },
+            ..container::Style::default()
         })
         .into()
 }

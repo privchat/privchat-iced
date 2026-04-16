@@ -289,6 +289,9 @@ pub trait SdkBridge: Send + Sync + 'static {
     ) -> Result<Option<u64>, UiError>;
 
     fn subscribe_timeline(&self, session_epoch: u64) -> Subscription<SdkEvent>;
+
+    async fn load_quick_phrases(&self) -> Result<Vec<String>, UiError>;
+    async fn save_quick_phrases(&self, phrases: &[String]) -> Result<(), UiError>;
 }
 
 #[derive(Clone)]
@@ -1900,5 +1903,28 @@ impl SdkBridge for PrivchatSdkBridge {
             },
             sdk_event_stream,
         )
+    }
+
+    async fn load_quick_phrases(&self) -> Result<Vec<String>, UiError> {
+        let data = self
+            .sdk
+            .kv_get_local("quick_phrases".to_string())
+            .await
+            .map_err(map_sdk_error)?;
+        match data {
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| UiError::Unknown(format!("解析常用语失败: {e}"))),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn save_quick_phrases(&self, phrases: &[String]) -> Result<(), UiError> {
+        let bytes = serde_json::to_vec(phrases)
+            .map_err(|e| UiError::Unknown(format!("序列化常用语失败: {e}")))?;
+        self.sdk
+            .kv_put_local("quick_phrases".to_string(), bytes)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
     }
 }

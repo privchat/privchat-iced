@@ -132,6 +132,33 @@ pub fn view<'a>(
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
+    } else if chat.composer.quick_phrase_open {
+        stack![
+            column![header, body, composer]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
+                .on_press(AppMessage::DismissQuickPhrase),
+            container(
+                column![
+                    container(text("")).height(Length::Fill),
+                    row![
+                        composer::quick_phrase_popup(&chat.composer.quick_phrases, chat.composer.quick_phrase_adding, &chat.composer.quick_phrase_input),
+                        container(text("")).width(Length::Fill)
+                    ]
+                    .width(Length::Fill),
+                    container(text("")).height(Length::Fixed(EMOJI_POPUP_BOTTOM_OFFSET))
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+            )
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding([0, 14])
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     } else {
         column![header, body, composer]
             .width(Length::Fill)
