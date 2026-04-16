@@ -419,10 +419,13 @@ fn format_last_msg_time(last_msg_timestamp: i64) -> Result<String, &'static str>
         last_msg_timestamp
     };
 
-    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
-    let hour = normalized / 3_600;
-    let minute = (normalized % 3_600) / 60;
-    Ok(format!("{hour:02}:{minute:02}"))
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0) {
+        Some(dt) => {
+            let local = dt.with_timezone(&chrono::Local);
+            Ok(local.format("%H:%M").to_string())
+        }
+        None => Err("TIME_ERR"),
+    }
 }
 
 fn truncate_single_line(value: &str, max_chars: usize) -> String {

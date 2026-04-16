@@ -418,8 +418,11 @@ fn format_message_time(created_at: i64) -> String {
         created_at
     };
 
-    let normalized = ((seconds % 86_400) + 86_400) % 86_400;
-    let hour = normalized / 3_600;
-    let minute = (normalized % 3_600) / 60;
-    format!("{hour:02}:{minute:02}")
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0) {
+        Some(dt) => {
+            let local = dt.with_timezone(&chrono::Local);
+            local.format("%H:%M").to_string()
+        }
+        None => "--:--".to_string(),
+    }
 }
