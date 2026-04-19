@@ -4177,12 +4177,14 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
 
             if let Some(index) = find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 dedup_remote_key(&mut chat.timeline.items, server_message_id, index);
                 true
             } else if let Some(index) =
                 find_item_index_by_server_message_id(&chat.timeline.items, server_message_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 true
             } else {
@@ -4206,6 +4208,7 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
             if let Some(index) =
                 find_item_index_by_server_message_id(&chat.timeline.items, server_message_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 true
             } else {
@@ -4242,6 +4245,13 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
 
 fn normalize_timeline_items(items: &mut [MessageVm]) {
     items.sort_by_key(timeline_order_key);
+}
+
+// delivered 是 0→1 单调 receipt 语义：MessageDelivered 事件和 DB CAS 都只从 false 升到 true。
+// Timeline upsert 做整项 replace，若 remote 来自早一拍的 DB 读，可能携带 delivered=false
+// 把已升级的内存态覆盖回去。这里用 OR-merge 阻断单调状态回退。
+fn preserve_monotonic_flags(remote: &mut MessageVm, current: &MessageVm) {
+    remote.delivered = remote.delivered || current.delivered;
 }
 
 fn timeline_order_key(item: &MessageVm) -> u64 {
