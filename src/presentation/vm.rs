@@ -40,6 +40,7 @@ pub struct SessionListItemVm {
     pub subtitle: String,
     pub unread_count: u32,
     pub last_msg_timestamp: i64,
+    pub is_pinned: bool,
 }
 
 #[derive(Debug, Clone, Default)]

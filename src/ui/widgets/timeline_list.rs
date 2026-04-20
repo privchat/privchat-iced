@@ -15,7 +15,6 @@ pub fn view<'a>(
     channel_id: u64,
     channel_type: i32,
     timeline: &'a TimelineState,
-    opened_menu_message_id: Option<u64>,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
     peer_last_read_pts: Option<u64>,
     playing_voice_message_id: Option<u64>,
@@ -32,7 +31,6 @@ pub fn view<'a>(
             let render_media_preview = index >= start_media_index;
             list = list.push(message_bubble::view(
                 message,
-                opened_menu_message_id,
                 render_media_preview,
                 image_cache,
                 peer_last_read_pts,

@@ -90,10 +90,16 @@ pub fn update(
                     chat.peer_user_id = item.peer_user_id;
                 }
             }
-            // Removed stale active_chat clearing logic from SessionListLoaded.
-            // Session list refresh should only update the list and total count.
-            // Unread clearing is strictly handled by the reading gate (ConversationOpened / ViewportChanged)
-            // to prevent clearing unreads for conversations the user is not actively viewing.
+            // Read Gate: the currently viewed conversation must never show unread
+            // badges or contribute to the total badge. Server snapshot can still
+            // carry a stale positive count because mark_read is eventually consistent.
+            if let Some(active_channel_id) = state.active_read_channel_id {
+                for item in state.session_list.items.iter_mut() {
+                    if item.channel_id == active_channel_id {
+                        item.unread_count = 0;
+                    }
+                }
+            }
             state.session_list.total_unread_count = state
                 .session_list
                 .items
@@ -775,7 +781,157 @@ pub fn update(
         AppMessage::ConversationSelected {
             channel_id,
             channel_type,
-        } => handle_conversation_selected(state, bridge, channel_id, channel_type),
+        } => {
+            state.session_list.context_menu = None;
+            handle_conversation_selected(state, bridge, channel_id, channel_type)
+        }
+
+        AppMessage::SessionListCursorMoved(point) => {
+            state.session_list.last_cursor_pos = Some(point);
+            Task::none()
+        }
+
+        AppMessage::SessionListItemRightClicked {
+            channel_id,
+            channel_type,
+            is_pinned,
+        } => {
+            state.session_list.context_menu = Some(crate::app::state::SessionContextMenuState {
+                channel_id,
+                channel_type,
+                is_pinned,
+                anchor_pos: state.session_list.last_cursor_pos,
+            });
+            Task::none()
+        }
+
+        AppMessage::DismissSessionContextMenu => {
+            state.session_list.context_menu = None;
+            Task::none()
+        }
+
+        AppMessage::PinChannelPressed {
+            channel_id,
+            channel_type,
+            pinned,
+        } => {
+            state.session_list.context_menu = None;
+            let pin_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { pin_bridge.pin_channel(channel_id, pinned).await },
+                move |result| AppMessage::PinChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::PinChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                tracing::info!(
+                    "pin_channel ok: channel_id={} channel_type={}",
+                    channel_id,
+                    channel_type
+                );
+                schedule_session_list_refresh(state, bridge)
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("PIN_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
+
+        AppMessage::HideChannelPressed {
+            channel_id,
+            channel_type,
+        } => {
+            state.session_list.context_menu = None;
+            let hide_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { hide_bridge.hide_channel(channel_id).await },
+                move |result| AppMessage::HideChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::HideChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                // Close chat if the hidden channel is currently active.
+                if state
+                    .active_chat
+                    .as_ref()
+                    .map(|chat| chat.channel_id == channel_id && chat.channel_type == channel_type)
+                    .unwrap_or(false)
+                {
+                    leave_reading_conversation(state);
+                    state.active_chat = None;
+                    state.route = Route::SessionList;
+                }
+                schedule_session_list_refresh(state, bridge)
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("HIDE_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
+
+        AppMessage::DeleteChannelPressed {
+            channel_id,
+            channel_type,
+        } => {
+            state.session_list.context_menu = None;
+            let delete_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { delete_bridge.delete_channel_local(channel_id).await },
+                move |result| AppMessage::DeleteChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::DeleteChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                if state
+                    .active_chat
+                    .as_ref()
+                    .map(|chat| chat.channel_id == channel_id && chat.channel_type == channel_type)
+                    .unwrap_or(false)
+                {
+                    leave_reading_conversation(state);
+                    state.active_chat = None;
+                    state.route = Route::SessionList;
+                }
+                Task::batch([
+                    schedule_session_list_refresh(state, bridge),
+                    schedule_total_unread_refresh(bridge),
+                ])
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("DELETE_CHANNEL_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
 
         AppMessage::ConversationOpened {
             channel_id,
@@ -1909,13 +2065,43 @@ pub fn update(
             filename,
         } => {
             if let Some(chat) = &mut state.active_chat {
+                let snapshot = chat
+                    .timeline
+                    .items
+                    .iter()
+                    .find(|m| m.message_id == message_id)
+                    .cloned();
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state) =
+                    if let Some(msg) = snapshot {
+                        (
+                            msg.channel_id,
+                            msg.channel_type,
+                            msg.key,
+                            msg.server_message_id,
+                            msg.is_own,
+                            msg.is_deleted,
+                            msg.send_state,
+                        )
+                    } else {
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None)
+                    };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
+                    channel_id,
+                    channel_type,
+                    open_token: chat.open_token,
+                    message_key,
+                    server_message_id,
+                    is_own,
+                    is_revoked,
+                    is_attachment: true,
+                    send_state,
                     created_at,
                     local_path,
                     file_id,
                     filename,
                     copy_text: None,
+                    anchor_pos: chat.last_cursor_pos,
                 });
             }
             Task::none()
@@ -1923,13 +2109,44 @@ pub fn update(
 
         AppMessage::ShowTextMenu { message_id, text } => {
             if let Some(chat) = &mut state.active_chat {
+                let snapshot = chat
+                    .timeline
+                    .items
+                    .iter()
+                    .find(|m| m.message_id == message_id)
+                    .cloned();
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state, created_at) =
+                    if let Some(msg) = snapshot {
+                        (
+                            msg.channel_id,
+                            msg.channel_type,
+                            msg.key,
+                            msg.server_message_id,
+                            msg.is_own,
+                            msg.is_deleted,
+                            msg.send_state,
+                            msg.created_at,
+                        )
+                    } else {
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None, 0)
+                    };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
-                    created_at: 0,
+                    channel_id,
+                    channel_type,
+                    open_token: chat.open_token,
+                    message_key,
+                    server_message_id,
+                    is_own,
+                    is_revoked,
+                    is_attachment: false,
+                    send_state,
+                    created_at,
                     local_path: None,
                     file_id: None,
                     filename: String::new(),
                     copy_text: Some(text),
+                    anchor_pos: chat.last_cursor_pos,
                 });
             }
             Task::none()
@@ -1938,6 +2155,13 @@ pub fn update(
         AppMessage::DismissAttachmentMenu => {
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::ChatCursorMoved(point) => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.last_cursor_pos = Some(point);
             }
             Task::none()
         }
@@ -2461,6 +2685,9 @@ pub fn update(
             channel_type: _,
             server_message_id,
         } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
             let bridge = Arc::clone(bridge);
             Task::perform(
                 async move { bridge.revoke_message(channel_id, server_message_id).await },
@@ -2519,6 +2746,52 @@ pub fn update(
             state.auth.error = Some(ui_text);
             Task::none()
         }
+
+        AppMessage::DeleteMessageLocalPressed {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            key,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.delete_message_local(message_id).await },
+                move |result| AppMessage::DeleteMessageLocalResolved {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    key: key.clone(),
+                    result,
+                },
+            )
+        }
+
+        AppMessage::DeleteMessageLocalResolved {
+            channel_id,
+            channel_type,
+            open_token,
+            key,
+            result,
+        } => match result {
+            Ok(_) => Task::done(AppMessage::TimelinePatched {
+                channel_id,
+                channel_type,
+                open_token,
+                revision: events::allocate_patch_revision(),
+                patch: TimelinePatchVm::RemoveMessage { key },
+            }),
+            Err(error) => {
+                let text = format!("本地删除失败：{}", format_ui_error(&error));
+                warn!("delete_message_local failed: {}", format_ui_error(&error));
+                append_runtime_log(state, "WARN", &text);
+                state.auth.error = Some(text);
+                Task::none()
+            }
+        },
 
         AppMessage::GlobalMessageIngress {
             message_id,
@@ -2931,6 +3204,7 @@ fn handle_conversation_selected(
         peer_last_read_pts: None,
         attachment_menu: None,
         user_profile_panel: None,
+        last_cursor_pos: None,
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
@@ -5333,6 +5607,10 @@ mod tests {
             Ok(())
         }
 
+        async fn delete_message_local(&self, _message_id: u64) -> Result<bool, UiError> {
+            Ok(true)
+        }
+
         async fn load_history_before(
             &self,
             _channel_id: u64,
@@ -5391,7 +5669,9 @@ mod tests {
             typing_user_id: None,
     
             peer_last_read_pts: None,
-        attachment_menu: None,
+            attachment_menu: None,
+            user_profile_panel: None,
+            last_cursor_pos: None,
         });
         state
     }

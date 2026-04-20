@@ -604,6 +604,7 @@ pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm
         subtitle,
         unread_count: channel.unread_count.max(0) as u32,
         last_msg_timestamp: channel.last_msg_timestamp,
+        is_pinned: channel.top > 0,
     }
 }
 

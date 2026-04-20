@@ -11,7 +11,8 @@ use privchat_protocol::message::ContentMessageType;
 use privchat_protocol::rpc::account::user::{DetailSourceType, UserType};
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
-    AccountUserDetailResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
+    AccountUserDetailResponse, ChannelHideRequest, ChannelHideResponse, ChannelPinRequest,
+    ChannelPinResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
     FriendAcceptResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
     FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse, MessageRevokeRequest,
     MessageRevokeResponse,
@@ -20,7 +21,7 @@ use privchat_protocol::rpc::{
 };
 use privchat_sdk::{
     NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend,
-    TypingActionType,
+    TypingActionType, UpsertChannelInput,
 };
 use tokio::sync::broadcast::error::RecvError;
 
@@ -256,6 +257,19 @@ pub trait SdkBridge: Send + Sync + 'static {
         is_typing: bool,
     ) -> Result<(), UiError>;
     async fn revoke_message(&self, channel_id: u64, server_message_id: u64) -> Result<(), UiError>;
+
+    /// 置顶/取消置顶频道：调用 RPC 并将 `top` 同步到本地 channel 表。
+    async fn pin_channel(&self, channel_id: u64, pinned: bool) -> Result<(), UiError>;
+
+    /// 隐藏频道：调用 RPC 并同步写本地 hidden 标记。
+    async fn hide_channel(&self, channel_id: u64) -> Result<(), UiError>;
+
+    /// 本地删除频道：不触达服务端，清 DB 行、消息及本地附件目录。
+    async fn delete_channel_local(&self, channel_id: u64) -> Result<(), UiError>;
+
+    /// 本地删除一条消息：不触达服务端，仅清 DB 行与本地附件目录。
+    /// 返回 true 表示命中行被删除；false 表示消息不存在（幂等）。
+    async fn delete_message_local(&self, message_id: u64) -> Result<bool, UiError>;
 
     async fn retry_send(
         &self,
@@ -1710,6 +1724,114 @@ impl SdkBridge for PrivchatSdkBridge {
                 .map_err(map_sdk_error)?;
         }
         Ok(())
+    }
+
+    async fn pin_channel(&self, channel_id: u64, pinned: bool) -> Result<(), UiError> {
+        let ok: ChannelPinResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::channel::PIN,
+                &ChannelPinRequest {
+                    user_id: 0,
+                    channel_id,
+                    pinned,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("置顶失败".to_string()));
+        }
+        // Persist `top` locally so the change survives the next session list reload.
+        if let Some(channel) = self
+            .sdk
+            .get_channel_by_id(channel_id)
+            .await
+            .map_err(map_sdk_error)?
+        {
+            self.sdk
+                .upsert_channel(UpsertChannelInput {
+                    channel_id: channel.channel_id,
+                    channel_type: channel.channel_type,
+                    channel_name: channel.channel_name,
+                    channel_remark: channel.channel_remark,
+                    avatar: channel.avatar,
+                    unread_count: channel.unread_count,
+                    top: if pinned { 1 } else { 0 },
+                    mute: channel.mute,
+                    last_msg_timestamp: channel.last_msg_timestamp,
+                    last_local_message_id: channel.last_local_message_id,
+                    last_msg_content: channel.last_msg_content,
+                    version: channel.version,
+                })
+                .await
+                .map_err(map_sdk_error)?;
+        }
+        Ok(())
+    }
+
+    async fn hide_channel(&self, channel_id: u64) -> Result<(), UiError> {
+        let ok: ChannelHideResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::channel::HIDE,
+                &ChannelHideRequest {
+                    user_id: 0,
+                    channel_id,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("隐藏失败".to_string()));
+        }
+        self.sdk
+            .set_channel_hidden(channel_id, true)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn delete_channel_local(&self, channel_id: u64) -> Result<(), UiError> {
+        let messages = self
+            .sdk
+            .delete_channel_local(channel_id)
+            .await
+            .map_err(map_sdk_error)?;
+        if let Some(uid) = self.current_uid().await? {
+            let data_dir = std::env::var("PRIVCHAT_DATA_DIR").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.privchat-rust", home)
+            });
+            let root = std::path::Path::new(&data_dir);
+            for stored in &messages {
+                let canonical = privchat_sdk::media_store::get_canonical_message_dir(
+                    root,
+                    uid,
+                    stored.message_id as i64,
+                    stored.created_at,
+                );
+                let _ = std::fs::remove_dir_all(&canonical);
+                let legacy = root
+                    .join("users")
+                    .join(uid.to_string())
+                    .join("files")
+                    .join(stored.message_id.to_string());
+                if legacy != canonical {
+                    let _ = std::fs::remove_dir_all(&legacy);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_message_local(&self, message_id: u64) -> Result<bool, UiError> {
+        let stored = self
+            .sdk
+            .delete_message_local(message_id)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(stored.is_some())
     }
 
     async fn retry_send(

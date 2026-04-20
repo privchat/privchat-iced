@@ -1,8 +1,8 @@
-use iced::widget::{button, column, container, row, scrollable, stack, text, text_input};
+use iced::widget::{button, column, container, mouse_area, row, scrollable, stack, text, text_input};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
-use crate::app::state::{AppState, SessionListItemState};
+use crate::app::state::{AppState, SessionContextMenuState, SessionListItemState};
 use crate::presentation::vm::PresenceVm;
 use crate::ui::icons::{self, Icon};
 
@@ -11,6 +11,7 @@ const C_SEARCH_BG: Color = Color::from_rgb8(0x24, 0x27, 0x2D);
 const C_SEARCH_BORDER: Color = Color::from_rgb8(0x3A, 0x3F, 0x47);
 const C_LIST_HOVER: Color = Color::from_rgb8(0x37, 0x3B, 0x42);
 const C_LIST_SELECTED: Color = Color::from_rgb8(0x4C, 0x50, 0x57);
+const C_LIST_PINNED: Color = Color::from_rgb8(0x31, 0x35, 0x3C);
 const C_ONLINE: Color = Color::from_rgb8(0x22, 0xC5, 0x5E);
 
 /// Render WeChat-like session/conversation panel.
@@ -34,7 +35,14 @@ pub fn view(
         );
     }
 
-    if session_list.items.is_empty() {
+    let mut ordered: Vec<&SessionListItemState> = session_list.items.iter().collect();
+    ordered.sort_by(|a, b| {
+        b.is_pinned
+            .cmp(&a.is_pinned)
+            .then(b.last_msg_timestamp.cmp(&a.last_msg_timestamp))
+    });
+
+    if ordered.is_empty() {
         list = list.push(
             container(
                 text("暂无会话")
@@ -45,7 +53,7 @@ pub fn view(
             .padding([20, 16]),
         );
     } else {
-        for item in &session_list.items {
+        for item in &ordered {
             let selected = active_chat.is_some_and(|(channel_id, channel_type)| {
                 channel_id == item.channel_id && channel_type == item.channel_type
             });
@@ -69,14 +77,51 @@ pub fn view(
         }
     }
 
-    column![
+    let panel: Element<'_, AppMessage> = column![
         search_bar(),
         scrollable(list)
             .height(Length::Fill)
             .style(session_scroll_style),
     ]
     .height(Length::Fill)
-    .into()
+    .into();
+
+    // Wrap in mouse_area to track cursor for menu anchoring.
+    let tracked_panel: Element<'_, AppMessage> = mouse_area(panel)
+        .on_move(AppMessage::SessionListCursorMoved)
+        .into();
+
+    if let Some(menu) = &session_list.context_menu {
+        let pos = menu.anchor_pos.unwrap_or(iced::Point::ORIGIN);
+        let offset_x = pos.x.max(0.0);
+        let offset_y = pos.y.max(0.0);
+        stack![
+            tracked_panel,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+            )
+            .on_press(AppMessage::DismissSessionContextMenu)
+            .on_right_press(AppMessage::DismissSessionContextMenu),
+            column![
+                container(text("")).height(Length::Fixed(offset_y)),
+                row![
+                    container(text("")).width(Length::Fixed(offset_x)),
+                    context_menu_popup(menu),
+                    container(text("")).width(Length::Fill),
+                ],
+                container(text("")).height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        tracked_panel
+    }
 }
 
 fn search_bar() -> Element<'static, AppMessage> {
@@ -132,19 +177,32 @@ fn conversation_item<'a>(
     let status = resolve_presence_status(presence, friend_online_fallback);
     let is_online = status.as_ref().map(|value| value.is_online).unwrap_or(false);
 
+    let mut title_row = row![
+        container(
+            text(display_title)
+                .size(14)
+                .wrapping(iced::widget::text::Wrapping::None)
+                .color(Color::from_rgb8(0xEA, 0xEE, 0xF4))
+        )
+        .width(Length::Fill),
+        container(session_item_meta(item))
+            .width(Length::Fixed(52.0))
+            .align_x(alignment::Horizontal::Right),
+    ]
+    .spacing(4)
+    .align_y(alignment::Vertical::Center);
+
+    if item.is_pinned {
+        title_row = row![
+            text("📌").size(11),
+            title_row,
+        ]
+        .spacing(4)
+        .align_y(alignment::Vertical::Center);
+    }
+
     let mut text_col = column![
-        row![
-            container(
-                text(display_title)
-                    .size(14)
-                    .wrapping(iced::widget::text::Wrapping::None)
-                    .color(Color::from_rgb8(0xEA, 0xEE, 0xF4))
-            )
-            .width(Length::Fill),
-            container(session_item_meta(item))
-                .width(Length::Fixed(52.0))
-                .align_x(alignment::Horizontal::Right),
-        ],
+        title_row,
         text(display_subtitle)
             .size(12)
             .wrapping(iced::widget::text::Wrapping::None)
@@ -169,20 +227,103 @@ fn conversation_item<'a>(
     .spacing(9)
     .align_y(alignment::Vertical::Center);
 
-    button(container(row).width(Length::Fill))
+    let channel_id = item.channel_id;
+    let channel_type = item.channel_type;
+    let is_pinned = item.is_pinned;
+
+    let item_button = button(container(row).width(Length::Fill))
         .width(Length::Fill)
         .padding([10, 12])
-        .style(move |_theme: &Theme, status| session_item_style(selected, status))
+        .style(move |_theme: &Theme, status| session_item_style(selected, is_pinned, status))
         .on_press(AppMessage::ConversationSelected {
-            channel_id: item.channel_id,
-            channel_type: item.channel_type,
+            channel_id,
+            channel_type,
+        });
+
+    mouse_area(item_button)
+        .on_right_press(AppMessage::SessionListItemRightClicked {
+            channel_id,
+            channel_type,
+            is_pinned,
         })
         .into()
 }
 
-fn session_item_style(selected: bool, status: button::Status) -> button::Style {
+fn context_menu_popup<'a>(menu: &SessionContextMenuState) -> Element<'a, AppMessage> {
+    let channel_id = menu.channel_id;
+    let channel_type = menu.channel_type;
+    let pin_label = if menu.is_pinned { "取消置顶" } else { "置顶" };
+    let pin_next = !menu.is_pinned;
+
+    let items = column![
+        context_menu_item(
+            pin_label.to_string(),
+            AppMessage::PinChannelPressed {
+                channel_id,
+                channel_type,
+                pinned: pin_next,
+            },
+        ),
+        context_menu_item(
+            "隐藏".to_string(),
+            AppMessage::HideChannelPressed {
+                channel_id,
+                channel_type,
+            },
+        ),
+        context_menu_item(
+            "删除".to_string(),
+            AppMessage::DeleteChannelPressed {
+                channel_id,
+                channel_type,
+            },
+        ),
+    ]
+    .spacing(1);
+
+    container(items)
+        .width(Length::Fixed(140.0))
+        .padding(4)
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x2A, 0x2F, 0x37))),
+            border: border::width(1.0)
+                .color(Color::from_rgb8(0x3D, 0x44, 0x4D))
+                .rounded(8.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn context_menu_item<'a>(label: String, msg: AppMessage) -> Element<'a, AppMessage> {
+    button(text(label).size(13).color(Color::from_rgb8(0xE0, 0xE4, 0xEA)))
+        .width(Length::Fill)
+        .padding([6, 12])
+        .style(context_menu_item_style)
+        .on_press(msg)
+        .into()
+}
+
+fn context_menu_item_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(Background::Color(Color::from_rgb8(0x36, 0x3C, 0x44)))
+        }
+        _ => None,
+    };
+    button::Style {
+        background: bg,
+        text_color: Color::from_rgb8(0xE0, 0xE4, 0xEA),
+        border: border::rounded(4.0),
+        shadow: Default::default(),
+        snap: true,
+    }
+}
+
+fn session_item_style(selected: bool, is_pinned: bool, status: button::Status) -> button::Style {
     let active_bg = if selected {
         C_LIST_SELECTED
+    } else if is_pinned {
+        C_LIST_PINNED
     } else {
         C_PANEL_BG
     };

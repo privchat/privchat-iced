@@ -48,7 +48,6 @@ fn status_color(label: &str) -> Color {
 /// - `Bubble` 走常规 avatar + 气泡外壳
 pub fn view<'a>(
     message: &'a MessageVm,
-    opened_menu_message_id: Option<u64>,
     render_media_preview: bool,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
     peer_last_read_pts: Option<u64>,
@@ -124,31 +123,8 @@ pub fn view<'a>(
 
     let mut body = column![bubble].spacing(4);
 
-    let show_attachment_menu = opened_menu_message_id == Some(message.message_id) && is_attachment;
-    if show_attachment_menu {
-        body = body.push(
-            row![
-                small_menu_button("打开", AppMessage::AttachmentMenuOpen),
-                small_menu_button("打开所在目录", AppMessage::AttachmentMenuOpenFolder),
-                small_menu_button("另存为", AppMessage::AttachmentMenuSaveAs),
-            ]
-            .spacing(6),
-        );
-    } else if opened_menu_message_id == Some(message.message_id) {
-        body = body.push(row![small_menu_button("复制", AppMessage::TextMenuCopy)].spacing(6));
-    }
+    // 重试按钮保留为气泡旁常驻状态图标等价物（与 privchat-app 对齐，不放在菜单里）。
     if message.is_own {
-        if let Some(server_message_id) = message.server_message_id {
-            body = body.push(
-                button(text("撤回").size(11))
-                    .style(retry_button_style)
-                    .on_press(AppMessage::RevokeMessagePressed {
-                        channel_id: message.channel_id,
-                        channel_type: message.channel_type,
-                        server_message_id,
-                    }),
-            );
-        }
         if let Some(send_state) = &message.send_state {
             if matches!(send_state, MessageSendStateVm::FailedRetryable { .. })
                 && message.server_message_id.is_none()
@@ -201,7 +177,7 @@ pub fn view<'a>(
     }
 }
 
-/// 已撤回消息：保留 avatar + 气泡外壳，仅渲染灰色提示文案，无 footer / 菜单 / 撤回 / 重试。
+/// 已撤回消息：保留 avatar + 气泡外壳，仅渲染灰色提示文案；右键仍触发菜单（仅"本地删除"）。
 fn revoked_row<'a>(message: &'a MessageVm) -> Element<'a, AppMessage> {
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
@@ -234,7 +210,13 @@ fn revoked_row<'a>(message: &'a MessageVm) -> Element<'a, AppMessage> {
             .align_y(alignment::Vertical::Top)
     };
 
-    container(inner).width(Length::Fill).into()
+    let container_row = container(inner).width(Length::Fill);
+    mouse_area(container_row)
+        .on_right_press(AppMessage::ShowTextMenu {
+            message_id: message.message_id,
+            text: String::new(),
+        })
+        .into()
 }
 
 /// 系统消息：居中浅色药丸，无 avatar / 气泡背景 / footer / 菜单。
@@ -298,13 +280,6 @@ fn retry_button_style(_theme: &Theme, status: button::Status) -> button::Style {
         shadow: Default::default(),
         snap: true,
     }
-}
-
-fn small_menu_button<'a>(label: &'a str, msg: AppMessage) -> Element<'a, AppMessage> {
-    button(text(label).size(11))
-        .style(retry_button_style)
-        .on_press(msg)
-        .into()
 }
 
 fn fill() -> Element<'static, AppMessage> {

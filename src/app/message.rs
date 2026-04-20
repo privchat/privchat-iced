@@ -4,8 +4,8 @@ use iced::window;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
     GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, PresenceVm,
-    SearchUserVm, SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm,
-    UiError,
+    SearchUserVm, SessionListItemVm, TimelineItemKey, TimelinePatchVm, TimelineRevision,
+    TimelineSnapshotVm, UiError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +212,41 @@ pub enum AppMessage {
         channel_id: u64,
         channel_type: i32,
     },
+    SessionListCursorMoved(iced::Point),
+    SessionListItemRightClicked {
+        channel_id: u64,
+        channel_type: i32,
+        is_pinned: bool,
+    },
+    DismissSessionContextMenu,
+    PinChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+        pinned: bool,
+    },
+    PinChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
+    HideChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+    },
+    HideChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
+    DeleteChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+    },
+    DeleteChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
     ConversationOpened {
         channel_id: u64,
         channel_type: i32,
@@ -346,6 +381,7 @@ pub enum AppMessage {
         text: String,
     },
     DismissAttachmentMenu,
+    ChatCursorMoved(iced::Point),
     TextMenuCopy,
     AttachmentMenuOpen,
     AttachmentMenuOpenFolder,
@@ -483,6 +519,20 @@ pub enum AppMessage {
     RevokeMessageFailed {
         server_message_id: u64,
         error: UiError,
+    },
+    DeleteMessageLocalPressed {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        message_id: u64,
+        key: TimelineItemKey,
+    },
+    DeleteMessageLocalResolved {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        key: TimelineItemKey,
+        result: Result<bool, UiError>,
     },
     GlobalMessageIngress {
         message_id: u64,
