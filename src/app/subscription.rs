@@ -37,6 +37,9 @@ fn map_global_event(
     window_id: iced::window::Id,
 ) -> Option<AppMessage> {
     match event {
+        iced::Event::Window(window::Event::CloseRequested | window::Event::Closed) => {
+            Some(AppMessage::WindowCloseRequested { window_id })
+        }
         iced::Event::Mouse(mouse::Event::CursorMoved { position }) => {
             Some(AppMessage::GlobalCursorMoved {
                 window_id,
@@ -72,7 +75,6 @@ fn map_global_event(
 pub fn subscription(bridge: &Arc<dyn SdkBridge>, state: &AppState) -> Subscription<AppMessage> {
     let mut subscriptions = vec![
         event::listen_with(map_global_event),
-        window::close_requests().map(|window_id| AppMessage::WindowCloseRequested { window_id }),
         super::single_instance::listen(),
     ];
 

@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod app;
 mod audio;
 mod config;
@@ -215,6 +217,60 @@ fn main_window_settings() -> window::Settings {
     }
 }
 
+/// On Windows, iced daemon mode does not emit `CloseRequested` / `Closed`
+/// window events, so the process lingers after the user closes the window.
+/// Work around this by polling the Windows API for visible windows owned
+/// by this process; when none remain, exit.
+#[cfg(windows)]
+fn spawn_window_exit_watchdog() {
+    extern "system" {
+        fn EnumWindows(
+            callback: unsafe extern "system" fn(hwnd: isize, lparam: *mut WatchdogData) -> i32,
+            lparam: *mut WatchdogData,
+        ) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+    }
+
+    struct WatchdogData {
+        target_pid: u32,
+        found: bool,
+    }
+
+    unsafe extern "system" fn enum_callback(hwnd: isize, data: *mut WatchdogData) -> i32 {
+        let data = unsafe { &mut *data };
+        let mut pid: u32 = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid == data.target_pid && unsafe { IsWindowVisible(hwnd) } != 0 {
+            data.found = true;
+            return 0; // stop enumeration
+        }
+        1 // continue
+    }
+
+    let pid = std::process::id();
+
+    std::thread::spawn(move || {
+        // Give the window time to appear
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+
+            let mut data = WatchdogData {
+                target_pid: pid,
+                found: false,
+            };
+            unsafe { EnumWindows(enum_callback, &mut data) };
+
+            if !data.found {
+                tracing::info!("window watchdog: no visible windows, exiting");
+                std::process::exit(0);
+            }
+        }
+    });
+}
+
 fn main() -> anyhow::Result<()> {
     // 单实例守卫：通过文件排他锁 + UDS 实现。
     // 如果已有实例在运行，通知它激活主窗口，然后退出。
@@ -261,6 +317,9 @@ fn main() -> anyhow::Result<()> {
         app_name = %config.application.name,
         "config loaded"
     );
+
+    #[cfg(windows)]
+    spawn_window_exit_watchdog();
 
     iced::daemon(move || boot(config.clone()), update, view)
         .title(window_title)

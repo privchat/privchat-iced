@@ -448,16 +448,9 @@ pub fn update(
         }
 
         AppMessage::WindowCloseRequested { window_id } => {
-            if state.main_window_id == Some(window_id) {
-                // daemon mode does not auto-exit when all windows close;
-                // schedule a hard exit after giving iced::exit() a moment
-                // to flush state, so the process never lingers.
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    std::process::exit(0);
-                });
-                return iced::exit();
-            }
+            let is_main = state.main_window_id == Some(window_id);
+
+            // Clean up tracked sub-window state
             if state.add_friend_search_window_id == Some(window_id) {
                 state.add_friend_search_window_id = None;
             }
@@ -468,6 +461,22 @@ pub fn update(
                 state.image_viewer_window_id = None;
                 state.image_viewer = None;
             }
+
+            if is_main {
+                state.main_window_id = None;
+            }
+
+            // If the main window is being closed (or already gone), exit the process.
+            // daemon mode does not auto-exit when all windows close, so we
+            // schedule a hard exit as a fallback.
+            if is_main || state.main_window_id.is_none() {
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    std::process::exit(0);
+                });
+                return iced::exit();
+            }
+
             window::close(window_id)
         }
 
