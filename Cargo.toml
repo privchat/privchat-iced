@@ -26,6 +26,9 @@ privchat-sdk = { path = "../privchat-sdk/crates/privchat-sdk" }
 privchat-protocol = { path = "../privchat-protocol" }
 fs2 = "0.4"
 
+[build-dependencies]
+winres = "0.1"
+
 [package.metadata.bundle]
 name = "PrivChat"
 identifier = "com.netonstream.privchat-desktop"
