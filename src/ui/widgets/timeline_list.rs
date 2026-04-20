@@ -18,6 +18,7 @@ pub fn view<'a>(
     opened_menu_message_id: Option<u64>,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
     peer_last_read_pts: Option<u64>,
+    playing_voice_message_id: Option<u64>,
 ) -> Element<'a, AppMessage> {
     let mut list = column!().spacing(14).padding([12, 18]);
 
@@ -35,6 +36,7 @@ pub fn view<'a>(
                 render_media_preview,
                 image_cache,
                 peer_last_read_pts,
+                playing_voice_message_id,
             ));
         }
     }

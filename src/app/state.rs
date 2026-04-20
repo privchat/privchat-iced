@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc;
 
 use iced::widget::{image as iced_image, text_editor};
 use iced::window;
@@ -347,7 +348,23 @@ pub struct AppState {
     pub image_cache: HashMap<u64, iced_image::Handle>,
     /// message_ids currently being decoded asynchronously.
     pub image_decode_pending: HashSet<u64>,
+    /// 当前语音播放句柄；None 表示无在播。切换/结束时清空。
+    pub voice_playback: Option<VoicePlaybackHandle>,
     next_open_token: OpenToken,
+}
+
+/// 单个语音播放实例：持有停止信号通道，向 audio 线程发 `()` 即可中止。
+pub struct VoicePlaybackHandle {
+    pub message_id: u64,
+    pub stop_tx: mpsc::Sender<()>,
+}
+
+impl std::fmt::Debug for VoicePlaybackHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoicePlaybackHandle")
+            .field("message_id", &self.message_id)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for AppState {
@@ -405,6 +422,7 @@ impl AppState {
             media_downloads_inflight: HashSet::new(),
             image_cache: HashMap::new(),
             image_decode_pending: HashSet::new(),
+            voice_playback: None,
             next_open_token: 1,
         }
     }

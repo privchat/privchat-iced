@@ -21,7 +21,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 arboard = "3"
 image = { version = "0.25", default-features = false, features = ["png"] }
-rodio = { version = "0.20", default-features = false, features = ["wav"] }
+rodio = { version = "0.22", default-features = false, features = ["playback", "wav", "symphonia-aac", "symphonia-isomp4"] }
 privchat-sdk = { path = "../privchat-sdk/crates/privchat-sdk" }
 privchat-protocol = { path = "../privchat-protocol" }
 fs2 = "0.4"

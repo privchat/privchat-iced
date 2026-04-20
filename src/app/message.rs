@@ -541,4 +541,16 @@ pub enum AppMessage {
         at_bottom: bool,
         near_top: bool,
     },
+    /// 点击语音气泡的播放/停止按钮。若当前正在播放同一条则切为停止。
+    VoiceTogglePressed {
+        message_id: u64,
+        created_at: i64,
+        local_path: Option<String>,
+        file_id: Option<u64>,
+    },
+    /// 语音播放自然结束或被主动停止，清理 AppState.voice_playback。
+    VoicePlaybackFinished {
+        message_id: u64,
+        result: Result<(), UiError>,
+    },
 }

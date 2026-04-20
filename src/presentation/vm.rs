@@ -1,3 +1,5 @@
+use privchat_protocol::message::ContentMessageType;
+
 /// UI-only identities (not from SDK)
 pub type ClientTxnId = u64;
 pub type OpenToken = u64;
@@ -143,12 +145,24 @@ pub struct MessageVm {
     pub media_local_path: Option<String>,
     pub local_thumbnail_path: Option<String>,
     pub media_file_size: Option<u64>,
+    /// 语音时长（秒）。仅 Voice（语音消息）类型有效；Audio（音频文件）走文件气泡，不使用该字段。
+    pub voice_duration_secs: Option<u32>,
     pub created_at: i64,
     pub pts: Option<u64>,
     pub send_state: Option<MessageSendStateVm>,
     pub is_own: bool,
     pub is_deleted: bool,
     pub delivered: bool,
+}
+
+impl MessageVm {
+    /// 原始 i32 `message_type` 归一化成协议枚举。负数或未知 u32 返回 `None`
+    /// （保留"未识别类型兜底"的语义，避免新增协议类型时客户端 panic）。
+    pub fn content_type(&self) -> Option<ContentMessageType> {
+        u32::try_from(self.message_type)
+            .ok()
+            .and_then(ContentMessageType::from_u32)
+    }
 }
 
 #[derive(Debug, Clone, Default)]

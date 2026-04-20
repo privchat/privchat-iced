@@ -1,5 +1,5 @@
 use privchat_protocol::message::{
-    ContentMessageType, FileLikeMetadata, ImageMetadata, MessagePayloadEnvelope,
+    ContentMessageType, FileMetadata, ImageMetadata, MessagePayloadEnvelope,
 };
 use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,17 @@ use crate::presentation::vm::{
 const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
 const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
 const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
+const VOICE_MESSAGE_TYPE: i32 = ContentMessageType::Voice as i32;
+
+/// 语音消息本地存储约定：`{message_id}.m4a`（仅 privchat-iced 下载侧使用）。
+pub(crate) fn voice_local_filename(message_id: u64) -> String {
+    format!("{}.m4a", message_id)
+}
+
+/// 仅语音消息（录音气泡），不包含 Audio（音频文件，走 File 文件气泡）。
+fn is_voice(message_type: i32) -> bool {
+    message_type == VOICE_MESSAGE_TYPE
+}
 
 fn looks_like_media_metadata(value: &serde_json::Value) -> bool {
     value
@@ -153,6 +164,20 @@ fn extract_message_type_hint(content: &str) -> Option<i32> {
         Some(IMAGE_MESSAGE_TYPE)
     } else if mime.starts_with("video/") {
         Some(VIDEO_MESSAGE_TYPE)
+    } else if mime.starts_with("audio/") {
+        // 协议层不再区分 Audio 消息；MIME 只是启发式判定 —— 录音（voice_xxx / 携带 duration）
+        // 归为 Voice，其它音频文件一律落到 File 消息气泡。
+        let looks_like_voice = metadata
+            .get("filename")
+            .and_then(|v| v.as_str())
+            .map(|name| name.to_ascii_lowercase().starts_with("voice_"))
+            .unwrap_or(false)
+            || metadata.get("duration").is_some();
+        if looks_like_voice {
+            Some(VOICE_MESSAGE_TYPE)
+        } else {
+            Some(FILE_MESSAGE_TYPE)
+        }
     } else {
         Some(FILE_MESSAGE_TYPE)
     }
@@ -289,7 +314,7 @@ fn extract_media_info(
 ) -> (Option<String>, Option<String>, Option<u64>) {
     if !matches!(
         message_type,
-        IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE
+        IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE | VOICE_MESSAGE_TYPE
     ) {
         return (None, None, None);
     }
@@ -310,7 +335,7 @@ fn extract_media_info(
     let typed_image_meta =
         metadata.and_then(|m| serde_json::from_value::<ImageMetadata>(m.clone()).ok());
     let typed_file_meta =
-        metadata.and_then(|m| serde_json::from_value::<FileLikeMetadata>(m.clone()).ok());
+        metadata.and_then(|m| serde_json::from_value::<FileMetadata>(m.clone()).ok());
     let direct_url = typed_image_meta
         .as_ref()
         .and_then(|m| m.url.clone())
@@ -371,8 +396,57 @@ fn extract_media_info(
     // URL must come from payload metadata or runtime RPC (file/get_url).
     let resolved_url = direct_url;
 
-    let local_path = resolve_local_media_path(&body, metadata, current_uid, message_id, created_at);
+    let local_path = if is_voice(message_type) {
+        // Voice 规范命名：{message_id}.m4a（privchat-iced 下载侧约定）。
+        let voice_name = voice_local_filename(message_id);
+        resolve_media_in_storage(Some(&voice_name), current_uid, message_id, created_at)
+    } else {
+        resolve_local_media_path(&body, metadata, current_uid, message_id, created_at)
+    };
     (local_path, resolved_url, file_id_from_metadata)
+}
+
+fn resolve_media_in_storage(
+    expected_filename: Option<&str>,
+    current_uid: Option<u64>,
+    message_id: u64,
+    created_at: i64,
+) -> Option<String> {
+    for root in sdk_storage_roots() {
+        let users_root = root.join("users");
+        let mut uid_candidates = Vec::new();
+        if let Some(uid) = current_uid {
+            uid_candidates.push(uid);
+        }
+        if let Ok(entries) = std::fs::read_dir(&users_root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(uid_val) = path
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .and_then(|v| v.parse::<u64>().ok())
+                    {
+                        if !uid_candidates.contains(&uid_val) {
+                            uid_candidates.push(uid_val);
+                        }
+                    }
+                }
+            }
+        }
+        for uid_val in uid_candidates {
+            if let Some(path) = privchat_sdk::media_store::resolve_attachment_path(
+                &root,
+                uid_val,
+                message_id as i64,
+                created_at,
+                expected_filename,
+            ) {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
+    None
 }
 
 fn resolve_local_thumbnail_path(
@@ -448,6 +522,29 @@ fn extract_media_file_size(content: &str, extra: &str) -> Option<u64> {
         })
 }
 
+/// 提取语音消息时长（秒）。优先 extra.duration，兜底扫 metadata.duration / content.duration。
+/// Kotlin 侧存储约定：`extra = {"duration":3,...}`，单位为秒（见 PrivchatClient.android.kt L1193）。
+fn extract_voice_duration_secs(content: &str, extra: &str) -> Option<u32> {
+    fn pick(value: &serde_json::Value) -> Option<u32> {
+        let direct = value.get("duration").and_then(|v| v.as_u64());
+        let in_metadata = value
+            .get("metadata")
+            .and_then(|v| v.get("duration"))
+            .and_then(|v| v.as_u64());
+        let in_content = value
+            .get("content")
+            .and_then(|v| v.get("duration"))
+            .and_then(|v| v.as_u64());
+        direct.or(in_metadata).or(in_content).map(|v| v.min(u32::MAX as u64) as u32)
+    }
+    let extra_json = serde_json::from_str::<serde_json::Value>(extra).ok();
+    if let Some(v) = extra_json.as_ref().and_then(pick) {
+        return Some(v);
+    }
+    let content_json = serde_json::from_str::<serde_json::Value>(content).ok();
+    content_json.as_ref().and_then(pick)
+}
+
 fn extract_pts(extra: &str) -> Option<u64> {
     // Only recognise the canonical "pts" field.
     // Do NOT fall back to "version" — semantics unconfirmed; a wrong pts would
@@ -494,6 +591,7 @@ pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm
             Some(IMAGE_MESSAGE_TYPE) => "[图片]".to_string(),
             Some(VIDEO_MESSAGE_TYPE) => "[视频]".to_string(),
             Some(FILE_MESSAGE_TYPE) => "[文件]".to_string(),
+            Some(VOICE_MESSAGE_TYPE) => "[语音]".to_string(),
             _ => raw_subtitle,
         }
     };
@@ -567,6 +665,11 @@ pub fn map_stored_message_to_vm(
         message.created_at,
         message.message_type,
     );
+    let voice_duration_secs = if is_voice(message.message_type) {
+        extract_voice_duration_secs(&message.content, &message.extra)
+    } else {
+        None
+    };
 
     MessageVm {
         key,
@@ -583,6 +686,7 @@ pub fn map_stored_message_to_vm(
         media_local_path,
         local_thumbnail_path,
         media_file_size,
+        voice_duration_secs,
         created_at: message.created_at,
         pts: message.pts.or_else(|| extract_pts(&message.extra)),
         send_state,

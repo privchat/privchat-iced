@@ -2700,6 +2700,129 @@ pub fn update(
             at_bottom,
             near_top,
         } => handle_viewport_changed(state, bridge, channel_id, channel_type, at_bottom, near_top),
+
+        AppMessage::VoiceTogglePressed {
+            message_id,
+            created_at,
+            local_path,
+            file_id,
+        } => handle_voice_toggle(state, bridge, message_id, created_at, local_path, file_id),
+
+        AppMessage::VoicePlaybackFinished { message_id, result } => {
+            if let Err(ref err) = result {
+                tracing::warn!(message_id, error = ?err, "voice playback ended with error");
+            }
+            if state
+                .voice_playback
+                .as_ref()
+                .map(|h| h.message_id == message_id)
+                .unwrap_or(false)
+            {
+                state.voice_playback = None;
+            }
+            Task::none()
+        }
+    }
+}
+
+fn handle_voice_toggle(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    message_id: u64,
+    created_at: i64,
+    local_path: Option<String>,
+    file_id: Option<u64>,
+) -> Task<AppMessage> {
+    // 同一条再次点击 → 停止
+    if let Some(existing) = state.voice_playback.as_ref() {
+        if existing.message_id == message_id {
+            let _ = existing.stop_tx.send(());
+            state.voice_playback = None;
+            return Task::none();
+        }
+        // 不同条：先停掉当前的，再起新的
+        let _ = existing.stop_tx.send(());
+        state.voice_playback = None;
+    }
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    state.voice_playback = Some(crate::app::state::VoicePlaybackHandle {
+        message_id,
+        stop_tx,
+    });
+
+    let bridge = Arc::clone(bridge);
+    let uid = state.auth.user_id.unwrap_or(0);
+    let filename = Some(format!("{message_id}.m4a"));
+
+    Task::perform(
+        async move {
+            // 1. 确保本地文件就位：已有则直接用，否则下载为 {message_id}.m4a
+            let path = match local_path {
+                Some(p) if Path::new(&p).exists() => p,
+                _ => {
+                    let file_id = file_id.ok_or_else(|| {
+                        crate::presentation::vm::UiError::Unknown(
+                            "voice file_id missing".to_string(),
+                        )
+                    })?;
+                    let url = bridge.get_file_url(file_id).await?;
+                    ensure_attachment_local_path(
+                        None,
+                        Some(url),
+                        filename,
+                        None,
+                        uid,
+                        message_id,
+                        created_at,
+                    )
+                    .await?
+                }
+            };
+
+            // 2. 同步阻塞播放；主动停止由 stop_rx 决定
+            tokio::task::spawn_blocking(move || play_voice_blocking(&path, stop_rx))
+                .await
+                .map_err(|e| {
+                    crate::presentation::vm::UiError::Unknown(format!("voice join failed: {e}"))
+                })?
+        },
+        move |result| AppMessage::VoicePlaybackFinished { message_id, result },
+    )
+}
+
+/// 同步阻塞播放 m4a。以 rodio 解码 + Sink 播放，轮询 `stop_rx` 以允许主动停止。
+/// 播放自然完成或收到停止信号后返回。
+fn play_voice_blocking(
+    path: &str,
+    stop_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<(), crate::presentation::vm::UiError> {
+    use std::fs::File;
+    use std::time::Duration;
+
+    let stream_handle = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice output stream: {e}"))
+    })?;
+    let player = rodio::Player::connect_new(stream_handle.mixer());
+    let file = File::open(path).map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice open {path}: {e}"))
+    })?;
+    // 走 TryFrom<File>：自动补 byte_len + seekable=true。
+    // m4a 的 moov 可能在文件尾部，非 seekable 路径会报 "not streamable"。
+    let decoder = rodio::Decoder::try_from(file).map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice decode: {e}"))
+    })?;
+    player.append(decoder);
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            player.stop();
+            return Ok(());
+        }
+        if player.empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(80));
     }
 }
 
@@ -3408,6 +3531,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             media_local_path: None,
             local_thumbnail_path: None,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at: now,
             pts: None,
             send_state: Some(MessageSendStateVm::Sending),
@@ -3565,6 +3689,7 @@ fn handle_send_attachment_path(
             },
             local_thumbnail_path: None,
             media_file_size: local_file_size,
+            voice_duration_secs: None,
             created_at: now,
             pts: None,
             send_state: Some(MessageSendStateVm::Sending),

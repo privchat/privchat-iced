@@ -25,6 +25,7 @@ pub fn view<'a>(
     presence: Option<&'a PresenceVm>,
     typing_hint: Option<&'a str>,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
+    playing_voice_message_id: Option<u64>,
 ) -> Element<'a, AppMessage> {
     let title_label: Element<'_, AppMessage> = if let Some(peer_user_id) = chat.peer_user_id {
         mouse_area(
@@ -87,6 +88,7 @@ pub fn view<'a>(
                 chat.attachment_menu.as_ref().map(|m| m.message_id),
                 image_cache,
                 chat.peer_last_read_pts,
+                playing_voice_message_id,
             ),
         ]
         .height(Length::Fill),
