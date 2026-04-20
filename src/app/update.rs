@@ -90,10 +90,16 @@ pub fn update(
                     chat.peer_user_id = item.peer_user_id;
                 }
             }
-            // Removed stale active_chat clearing logic from SessionListLoaded.
-            // Session list refresh should only update the list and total count.
-            // Unread clearing is strictly handled by the reading gate (ConversationOpened / ViewportChanged)
-            // to prevent clearing unreads for conversations the user is not actively viewing.
+            // Read Gate: the currently viewed conversation must never show unread
+            // badges or contribute to the total badge. Server snapshot can still
+            // carry a stale positive count because mark_read is eventually consistent.
+            if let Some(active_channel_id) = state.active_read_channel_id {
+                for item in state.session_list.items.iter_mut() {
+                    if item.channel_id == active_channel_id {
+                        item.unread_count = 0;
+                    }
+                }
+            }
             state.session_list.total_unread_count = state
                 .session_list
                 .items
@@ -784,7 +790,157 @@ pub fn update(
         AppMessage::ConversationSelected {
             channel_id,
             channel_type,
-        } => handle_conversation_selected(state, bridge, channel_id, channel_type),
+        } => {
+            state.session_list.context_menu = None;
+            handle_conversation_selected(state, bridge, channel_id, channel_type)
+        }
+
+        AppMessage::SessionListCursorMoved(point) => {
+            state.session_list.last_cursor_pos = Some(point);
+            Task::none()
+        }
+
+        AppMessage::SessionListItemRightClicked {
+            channel_id,
+            channel_type,
+            is_pinned,
+        } => {
+            state.session_list.context_menu = Some(crate::app::state::SessionContextMenuState {
+                channel_id,
+                channel_type,
+                is_pinned,
+                anchor_pos: state.session_list.last_cursor_pos,
+            });
+            Task::none()
+        }
+
+        AppMessage::DismissSessionContextMenu => {
+            state.session_list.context_menu = None;
+            Task::none()
+        }
+
+        AppMessage::PinChannelPressed {
+            channel_id,
+            channel_type,
+            pinned,
+        } => {
+            state.session_list.context_menu = None;
+            let pin_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { pin_bridge.pin_channel(channel_id, pinned).await },
+                move |result| AppMessage::PinChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::PinChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                tracing::info!(
+                    "pin_channel ok: channel_id={} channel_type={}",
+                    channel_id,
+                    channel_type
+                );
+                schedule_session_list_refresh(state, bridge)
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("PIN_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
+
+        AppMessage::HideChannelPressed {
+            channel_id,
+            channel_type,
+        } => {
+            state.session_list.context_menu = None;
+            let hide_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { hide_bridge.hide_channel(channel_id).await },
+                move |result| AppMessage::HideChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::HideChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                // Close chat if the hidden channel is currently active.
+                if state
+                    .active_chat
+                    .as_ref()
+                    .map(|chat| chat.channel_id == channel_id && chat.channel_type == channel_type)
+                    .unwrap_or(false)
+                {
+                    leave_reading_conversation(state);
+                    state.active_chat = None;
+                    state.route = Route::SessionList;
+                }
+                schedule_session_list_refresh(state, bridge)
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("HIDE_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
+
+        AppMessage::DeleteChannelPressed {
+            channel_id,
+            channel_type,
+        } => {
+            state.session_list.context_menu = None;
+            let delete_bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { delete_bridge.delete_channel_local(channel_id).await },
+                move |result| AppMessage::DeleteChannelResolved {
+                    channel_id,
+                    channel_type,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::DeleteChannelResolved {
+            channel_id,
+            channel_type,
+            result,
+        } => match result {
+            Ok(()) => {
+                if state
+                    .active_chat
+                    .as_ref()
+                    .map(|chat| chat.channel_id == channel_id && chat.channel_type == channel_type)
+                    .unwrap_or(false)
+                {
+                    leave_reading_conversation(state);
+                    state.active_chat = None;
+                    state.route = Route::SessionList;
+                }
+                Task::batch([
+                    schedule_session_list_refresh(state, bridge),
+                    schedule_total_unread_refresh(bridge),
+                ])
+            }
+            Err(error) => {
+                state.session_list.load_error =
+                    Some(format!("DELETE_CHANNEL_ERR: {}", format_ui_error(&error)));
+                Task::none()
+            }
+        },
 
         AppMessage::ConversationOpened {
             channel_id,
@@ -1918,13 +2074,43 @@ pub fn update(
             filename,
         } => {
             if let Some(chat) = &mut state.active_chat {
+                let snapshot = chat
+                    .timeline
+                    .items
+                    .iter()
+                    .find(|m| m.message_id == message_id)
+                    .cloned();
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state) =
+                    if let Some(msg) = snapshot {
+                        (
+                            msg.channel_id,
+                            msg.channel_type,
+                            msg.key,
+                            msg.server_message_id,
+                            msg.is_own,
+                            msg.is_deleted,
+                            msg.send_state,
+                        )
+                    } else {
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None)
+                    };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
+                    channel_id,
+                    channel_type,
+                    open_token: chat.open_token,
+                    message_key,
+                    server_message_id,
+                    is_own,
+                    is_revoked,
+                    is_attachment: true,
+                    send_state,
                     created_at,
                     local_path,
                     file_id,
                     filename,
                     copy_text: None,
+                    anchor_pos: chat.last_cursor_pos,
                 });
             }
             Task::none()
@@ -1932,13 +2118,44 @@ pub fn update(
 
         AppMessage::ShowTextMenu { message_id, text } => {
             if let Some(chat) = &mut state.active_chat {
+                let snapshot = chat
+                    .timeline
+                    .items
+                    .iter()
+                    .find(|m| m.message_id == message_id)
+                    .cloned();
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state, created_at) =
+                    if let Some(msg) = snapshot {
+                        (
+                            msg.channel_id,
+                            msg.channel_type,
+                            msg.key,
+                            msg.server_message_id,
+                            msg.is_own,
+                            msg.is_deleted,
+                            msg.send_state,
+                            msg.created_at,
+                        )
+                    } else {
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None, 0)
+                    };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
-                    created_at: 0,
+                    channel_id,
+                    channel_type,
+                    open_token: chat.open_token,
+                    message_key,
+                    server_message_id,
+                    is_own,
+                    is_revoked,
+                    is_attachment: false,
+                    send_state,
+                    created_at,
                     local_path: None,
                     file_id: None,
                     filename: String::new(),
                     copy_text: Some(text),
+                    anchor_pos: chat.last_cursor_pos,
                 });
             }
             Task::none()
@@ -1947,6 +2164,13 @@ pub fn update(
         AppMessage::DismissAttachmentMenu => {
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::ChatCursorMoved(point) => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.last_cursor_pos = Some(point);
             }
             Task::none()
         }
@@ -2470,6 +2694,9 @@ pub fn update(
             channel_type: _,
             server_message_id,
         } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
             let bridge = Arc::clone(bridge);
             Task::perform(
                 async move { bridge.revoke_message(channel_id, server_message_id).await },
@@ -2528,6 +2755,52 @@ pub fn update(
             state.auth.error = Some(ui_text);
             Task::none()
         }
+
+        AppMessage::DeleteMessageLocalPressed {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            key,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+            }
+            let bridge = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge.delete_message_local(message_id).await },
+                move |result| AppMessage::DeleteMessageLocalResolved {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    key: key.clone(),
+                    result,
+                },
+            )
+        }
+
+        AppMessage::DeleteMessageLocalResolved {
+            channel_id,
+            channel_type,
+            open_token,
+            key,
+            result,
+        } => match result {
+            Ok(_) => Task::done(AppMessage::TimelinePatched {
+                channel_id,
+                channel_type,
+                open_token,
+                revision: events::allocate_patch_revision(),
+                patch: TimelinePatchVm::RemoveMessage { key },
+            }),
+            Err(error) => {
+                let text = format!("本地删除失败：{}", format_ui_error(&error));
+                warn!("delete_message_local failed: {}", format_ui_error(&error));
+                append_runtime_log(state, "WARN", &text);
+                state.auth.error = Some(text);
+                Task::none()
+            }
+        },
 
         AppMessage::GlobalMessageIngress {
             message_id,
@@ -2709,6 +2982,129 @@ pub fn update(
             at_bottom,
             near_top,
         } => handle_viewport_changed(state, bridge, channel_id, channel_type, at_bottom, near_top),
+
+        AppMessage::VoiceTogglePressed {
+            message_id,
+            created_at,
+            local_path,
+            file_id,
+        } => handle_voice_toggle(state, bridge, message_id, created_at, local_path, file_id),
+
+        AppMessage::VoicePlaybackFinished { message_id, result } => {
+            if let Err(ref err) = result {
+                tracing::warn!(message_id, error = ?err, "voice playback ended with error");
+            }
+            if state
+                .voice_playback
+                .as_ref()
+                .map(|h| h.message_id == message_id)
+                .unwrap_or(false)
+            {
+                state.voice_playback = None;
+            }
+            Task::none()
+        }
+    }
+}
+
+fn handle_voice_toggle(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    message_id: u64,
+    created_at: i64,
+    local_path: Option<String>,
+    file_id: Option<u64>,
+) -> Task<AppMessage> {
+    // 同一条再次点击 → 停止
+    if let Some(existing) = state.voice_playback.as_ref() {
+        if existing.message_id == message_id {
+            let _ = existing.stop_tx.send(());
+            state.voice_playback = None;
+            return Task::none();
+        }
+        // 不同条：先停掉当前的，再起新的
+        let _ = existing.stop_tx.send(());
+        state.voice_playback = None;
+    }
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    state.voice_playback = Some(crate::app::state::VoicePlaybackHandle {
+        message_id,
+        stop_tx,
+    });
+
+    let bridge = Arc::clone(bridge);
+    let uid = state.auth.user_id.unwrap_or(0);
+    let filename = Some(format!("{message_id}.m4a"));
+
+    Task::perform(
+        async move {
+            // 1. 确保本地文件就位：已有则直接用，否则下载为 {message_id}.m4a
+            let path = match local_path {
+                Some(p) if Path::new(&p).exists() => p,
+                _ => {
+                    let file_id = file_id.ok_or_else(|| {
+                        crate::presentation::vm::UiError::Unknown(
+                            "voice file_id missing".to_string(),
+                        )
+                    })?;
+                    let url = bridge.get_file_url(file_id).await?;
+                    ensure_attachment_local_path(
+                        None,
+                        Some(url),
+                        filename,
+                        None,
+                        uid,
+                        message_id,
+                        created_at,
+                    )
+                    .await?
+                }
+            };
+
+            // 2. 同步阻塞播放；主动停止由 stop_rx 决定
+            tokio::task::spawn_blocking(move || play_voice_blocking(&path, stop_rx))
+                .await
+                .map_err(|e| {
+                    crate::presentation::vm::UiError::Unknown(format!("voice join failed: {e}"))
+                })?
+        },
+        move |result| AppMessage::VoicePlaybackFinished { message_id, result },
+    )
+}
+
+/// 同步阻塞播放 m4a。以 rodio 解码 + Sink 播放，轮询 `stop_rx` 以允许主动停止。
+/// 播放自然完成或收到停止信号后返回。
+fn play_voice_blocking(
+    path: &str,
+    stop_rx: std::sync::mpsc::Receiver<()>,
+) -> Result<(), crate::presentation::vm::UiError> {
+    use std::fs::File;
+    use std::time::Duration;
+
+    let stream_handle = rodio::DeviceSinkBuilder::open_default_sink().map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice output stream: {e}"))
+    })?;
+    let player = rodio::Player::connect_new(stream_handle.mixer());
+    let file = File::open(path).map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice open {path}: {e}"))
+    })?;
+    // 走 TryFrom<File>：自动补 byte_len + seekable=true。
+    // m4a 的 moov 可能在文件尾部，非 seekable 路径会报 "not streamable"。
+    let decoder = rodio::Decoder::try_from(file).map_err(|e| {
+        crate::presentation::vm::UiError::Unknown(format!("voice decode: {e}"))
+    })?;
+    player.append(decoder);
+
+    loop {
+        if stop_rx.try_recv().is_ok() {
+            player.stop();
+            return Ok(());
+        }
+        if player.empty() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(80));
     }
 }
 
@@ -2817,6 +3213,7 @@ fn handle_conversation_selected(
         peer_last_read_pts: None,
         attachment_menu: None,
         user_profile_panel: None,
+        last_cursor_pos: None,
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
@@ -3417,6 +3814,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             media_local_path: None,
             local_thumbnail_path: None,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at: now,
             pts: None,
             send_state: Some(MessageSendStateVm::Sending),
@@ -3574,6 +3972,7 @@ fn handle_send_attachment_path(
             },
             local_thumbnail_path: None,
             media_file_size: local_file_size,
+            voice_duration_secs: None,
             created_at: now,
             pts: None,
             send_state: Some(MessageSendStateVm::Sending),
@@ -4186,12 +4585,14 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
 
             if let Some(index) = find_item_index_by_client_txn(&chat.timeline.items, client_txn_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 dedup_remote_key(&mut chat.timeline.items, server_message_id, index);
                 true
             } else if let Some(index) =
                 find_item_index_by_server_message_id(&chat.timeline.items, server_message_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 true
             } else {
@@ -4215,6 +4616,7 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
             if let Some(index) =
                 find_item_index_by_server_message_id(&chat.timeline.items, server_message_id)
             {
+                preserve_monotonic_flags(&mut remote, &chat.timeline.items[index]);
                 chat.timeline.items[index] = remote;
                 true
             } else {
@@ -4251,6 +4653,13 @@ fn apply_timeline_patch(chat: &mut ChatScreenState, patch: TimelinePatchVm) -> b
 
 fn normalize_timeline_items(items: &mut [MessageVm]) {
     items.sort_by_key(timeline_order_key);
+}
+
+// delivered 是 0→1 单调 receipt 语义：MessageDelivered 事件和 DB CAS 都只从 false 升到 true。
+// Timeline upsert 做整项 replace，若 remote 来自早一拍的 DB 读，可能携带 delivered=false
+// 把已升级的内存态覆盖回去。这里用 OR-merge 阻断单调状态回退。
+fn preserve_monotonic_flags(remote: &mut MessageVm, current: &MessageVm) {
+    remote.delivered = remote.delivered || current.delivered;
 }
 
 fn timeline_order_key(item: &MessageVm) -> u64 {
@@ -5207,6 +5616,10 @@ mod tests {
             Ok(())
         }
 
+        async fn delete_message_local(&self, _message_id: u64) -> Result<bool, UiError> {
+            Ok(true)
+        }
+
         async fn load_history_before(
             &self,
             _channel_id: u64,
@@ -5265,7 +5678,9 @@ mod tests {
             typing_user_id: None,
     
             peer_last_read_pts: None,
-        attachment_menu: None,
+            attachment_menu: None,
+            user_profile_panel: None,
+            last_cursor_pos: None,
         });
         state
     }

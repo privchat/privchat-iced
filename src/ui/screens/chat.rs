@@ -4,8 +4,8 @@ use iced::widget::{button, column, container, image, mouse_area, row, scrollable
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
-use crate::app::state::ChatScreenState;
-use crate::presentation::vm::PresenceVm;
+use crate::app::state::{AttachmentMenuState, ChatScreenState};
+use crate::presentation::vm::{MessageSendStateVm, PresenceVm};
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets::{composer, timeline_list, unread_banner};
 
@@ -25,6 +25,7 @@ pub fn view<'a>(
     presence: Option<&'a PresenceVm>,
     typing_hint: Option<&'a str>,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
+    playing_voice_message_id: Option<u64>,
 ) -> Element<'a, AppMessage> {
     let title_label: Element<'_, AppMessage> = if let Some(peer_user_id) = chat.peer_user_id {
         mouse_area(
@@ -77,16 +78,16 @@ pub fn view<'a>(
         ..container::Style::default()
     });
 
-    let body = container(
+    let body: Element<'_, AppMessage> = container(
         column![
             unread_banner::view(&chat.unread_marker),
             timeline_list::view(
                 chat.channel_id,
                 chat.channel_type,
                 &chat.timeline,
-                chat.attachment_menu.as_ref().map(|m| m.message_id),
                 image_cache,
                 chat.peer_last_read_pts,
+                playing_voice_message_id,
             ),
         ]
         .height(Length::Fill),
@@ -95,7 +96,8 @@ pub fn view<'a>(
     .style(|_| container::Style {
         background: Some(Background::Color(C_CHAT_BG)),
         ..container::Style::default()
-    });
+    })
+    .into();
 
     let composer = container(composer::view(&chat.composer))
         .height(Length::Fixed(COMPOSER_HEIGHT))
@@ -243,6 +245,45 @@ pub fn view<'a>(
         content
     };
 
+    // Right-click context menu overlay (positioned at cursor snapshot).
+    let content: Element<'_, AppMessage> = if let Some(menu) = &chat.attachment_menu {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let items = build_menu_items(menu, now_ms);
+        if items.is_empty() {
+            content
+        } else {
+            let pos = menu.anchor_pos.unwrap_or(iced::Point::ORIGIN);
+            let offset_x = pos.x.max(0.0);
+            let offset_y = pos.y.max(0.0);
+            stack![
+                content,
+                mouse_area(
+                    container(text(""))
+                        .width(Length::Fill)
+                        .height(Length::Fill)
+                )
+                .on_press(AppMessage::DismissAttachmentMenu)
+                .on_right_press(AppMessage::DismissAttachmentMenu),
+                column![
+                    container(text("")).height(Length::Fixed(offset_y)),
+                    row![
+                        container(text("")).width(Length::Fixed(offset_x)),
+                        context_menu_popup(items),
+                        container(text("")).width(Length::Fill),
+                    ],
+                    container(text("")).height(Length::Fill),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        }
+    } else {
+        content
+    };
+
     // User profile panel overlay
     let content: Element<'_, AppMessage> =
         if let Some(profile_panel) = &chat.user_profile_panel {
@@ -271,10 +312,13 @@ pub fn view<'a>(
             content
         };
 
-    container(content)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+    mouse_area(
+        container(content)
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .on_move(AppMessage::ChatCursorMoved)
+    .into()
 }
 
 const C_CARD_BG: Color = Color::from_rgb8(0x25, 0x2A, 0x31);
@@ -521,6 +565,124 @@ fn presence_status_text<'a>(
         }
         (None, Some(typing_label)) => text(typing_label).size(12).color(C_STATUS_ONLINE).into(),
         (None, None) => text("").size(12).color(C_STATUS_OFFLINE).into(),
+    }
+}
+
+fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, AppMessage)> {
+    let mut items: Vec<(String, AppMessage)> = Vec::new();
+
+    let delete_local = || AppMessage::DeleteMessageLocalPressed {
+        channel_id: menu.channel_id,
+        channel_type: menu.channel_type,
+        open_token: menu.open_token,
+        message_id: menu.message_id,
+        key: menu.message_key.clone(),
+    };
+
+    if menu.is_revoked {
+        items.push(("本地删除".to_string(), delete_local()));
+        return items;
+    }
+
+    let is_pending_or_sending = matches!(
+        menu.send_state,
+        Some(MessageSendStateVm::Queued)
+            | Some(MessageSendStateVm::Sending)
+            | Some(MessageSendStateVm::Retrying)
+    );
+    if is_pending_or_sending {
+        items.push(("取消发送".to_string(), delete_local()));
+        return items;
+    }
+
+    let is_failed = matches!(
+        menu.send_state,
+        Some(MessageSendStateVm::FailedRetryable { .. })
+            | Some(MessageSendStateVm::FailedPermanent { .. })
+    );
+
+    if let Some(text_body) = &menu.copy_text {
+        if !text_body.is_empty() {
+            items.push(("复制".to_string(), AppMessage::TextMenuCopy));
+        }
+    }
+
+    if menu.is_attachment {
+        items.push(("打开".to_string(), AppMessage::AttachmentMenuOpen));
+        items.push((
+            "打开所在文件夹".to_string(),
+            AppMessage::AttachmentMenuOpenFolder,
+        ));
+        items.push(("另存为".to_string(), AppMessage::AttachmentMenuSaveAs));
+    }
+
+    // 撤回：自己发送 + 未失败 + 5 分钟内 + 服务端已确认
+    if menu.is_own && !is_failed {
+        if let Some(smid) = menu.server_message_id {
+            let created_ms = if menu.created_at > 1_000_000_000_000 {
+                menu.created_at
+            } else {
+                menu.created_at.saturating_mul(1000)
+            };
+            let age_ms = now_ms.saturating_sub(created_ms);
+            const RECALL_WINDOW_MS: i64 = 5 * 60 * 1000;
+            if (0..=RECALL_WINDOW_MS).contains(&age_ms) {
+                items.push((
+                    "撤回".to_string(),
+                    AppMessage::RevokeMessagePressed {
+                        channel_id: menu.channel_id,
+                        channel_type: menu.channel_type,
+                        server_message_id: smid,
+                    },
+                ));
+            }
+        }
+    }
+
+    items.push(("本地删除".to_string(), delete_local()));
+    items
+}
+
+fn context_menu_popup<'a>(items: Vec<(String, AppMessage)>) -> Element<'a, AppMessage> {
+    let mut col = column![].spacing(1);
+    for (label, msg) in items {
+        col = col.push(context_menu_item(label, msg));
+    }
+    container(col)
+        .width(Length::Fixed(160.0))
+        .padding(4)
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x2A, 0x2F, 0x37))),
+            border: border::width(1.0)
+                .color(Color::from_rgb8(0x3D, 0x44, 0x4D))
+                .rounded(8.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn context_menu_item<'a>(label: String, msg: AppMessage) -> Element<'a, AppMessage> {
+    button(text(label).size(13).color(Color::from_rgb8(0xE0, 0xE4, 0xEA)))
+        .width(Length::Fill)
+        .padding([6, 12])
+        .style(context_menu_item_style)
+        .on_press(msg)
+        .into()
+}
+
+fn context_menu_item_style(_theme: &iced::Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(Background::Color(Color::from_rgb8(0x36, 0x3C, 0x44)))
+        }
+        _ => None,
+    };
+    button::Style {
+        background: bg,
+        text_color: Color::from_rgb8(0xE0, 0xE4, 0xEA),
+        border: border::rounded(4.0),
+        shadow: Default::default(),
+        snap: true,
     }
 }
 

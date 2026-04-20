@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc;
 
 use iced::widget::{image as iced_image, text_editor};
 use iced::window;
@@ -60,6 +61,10 @@ pub struct SessionListState {
     pub refresh_pending: bool,
     /// True while an async load_session_list call is in-flight.
     pub is_loading: bool,
+    /// 右键菜单状态。None 表示没有打开的菜单。
+    pub context_menu: Option<SessionContextMenuState>,
+    /// 会话面板内最近一次光标位置（相对面板左上角），供右键菜单定位。
+    pub last_cursor_pos: Option<iced::Point>,
 }
 
 impl Default for SessionListState {
@@ -70,8 +75,18 @@ impl Default for SessionListState {
             total_unread_count: 0,
             refresh_pending: false,
             is_loading: false,
+            context_menu: None,
+            last_cursor_pos: None,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionContextMenuState {
+    pub channel_id: u64,
+    pub channel_type: i32,
+    pub is_pinned: bool,
+    pub anchor_pos: Option<iced::Point>,
 }
 
 #[derive(Debug)]
@@ -285,6 +300,9 @@ pub struct ChatScreenState {
     pub peer_last_read_pts: Option<u64>,
     pub attachment_menu: Option<AttachmentMenuState>,
     pub user_profile_panel: Option<UserProfilePanelState>,
+    /// 最近一次在聊天正文内追踪到的光标位置（相对正文 mouse_area 左上角）。
+    /// 用于右键菜单按触发位置悬浮渲染。
+    pub last_cursor_pos: Option<iced::Point>,
 }
 
 #[derive(Debug, Clone)]
@@ -311,11 +329,22 @@ pub struct ImageViewerState {
 #[derive(Debug, Clone)]
 pub struct AttachmentMenuState {
     pub message_id: u64,
+    pub channel_id: u64,
+    pub channel_type: i32,
+    pub open_token: crate::presentation::vm::OpenToken,
+    pub message_key: crate::presentation::vm::TimelineItemKey,
+    pub server_message_id: Option<u64>,
+    pub is_own: bool,
+    pub is_revoked: bool,
+    pub is_attachment: bool,
+    pub send_state: Option<crate::presentation::vm::MessageSendStateVm>,
     pub created_at: i64,
     pub local_path: Option<String>,
     pub file_id: Option<u64>,
     pub filename: String,
     pub copy_text: Option<String>,
+    /// 右键触发时鼠标相对聊天正文的位置，用于浮层定位。
+    pub anchor_pos: Option<iced::Point>,
 }
 
 pub struct AppState {
@@ -347,7 +376,23 @@ pub struct AppState {
     pub image_cache: HashMap<u64, iced_image::Handle>,
     /// message_ids currently being decoded asynchronously.
     pub image_decode_pending: HashSet<u64>,
+    /// 当前语音播放句柄；None 表示无在播。切换/结束时清空。
+    pub voice_playback: Option<VoicePlaybackHandle>,
     next_open_token: OpenToken,
+}
+
+/// 单个语音播放实例：持有停止信号通道，向 audio 线程发 `()` 即可中止。
+pub struct VoicePlaybackHandle {
+    pub message_id: u64,
+    pub stop_tx: mpsc::Sender<()>,
+}
+
+impl std::fmt::Debug for VoicePlaybackHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VoicePlaybackHandle")
+            .field("message_id", &self.message_id)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for AppState {
@@ -405,6 +450,7 @@ impl AppState {
             media_downloads_inflight: HashSet::new(),
             image_cache: HashMap::new(),
             image_decode_pending: HashSet::new(),
+            voice_playback: None,
             next_open_token: 1,
         }
     }

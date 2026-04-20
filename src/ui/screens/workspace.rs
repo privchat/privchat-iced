@@ -50,6 +50,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
                     active_presence,
                     chat_state.typing_hint.as_deref(),
                     &state.image_cache,
+                    state.voice_playback.as_ref().map(|h| h.message_id),
                 )
             } else {
                 empty_detail("请选择一个会话")

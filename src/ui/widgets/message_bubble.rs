@@ -1,15 +1,11 @@
 use std::collections::HashMap;
 
-use iced::widget::{button, column, container, image, mouse_area, row, text};
+use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
-use privchat_protocol::message::ContentMessageType;
 
 use crate::app::message::AppMessage;
 use crate::presentation::vm::{MessageSendStateVm, MessageVm};
-
-const IMAGE_MESSAGE_TYPE: i32 = ContentMessageType::Image as i32;
-const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
-const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
+use crate::ui::widgets::bubbles::{self, BubbleCtx, MessageRenderType};
 
 fn resolve_outgoing_status(message: &MessageVm, peer_last_read_pts: Option<u64>) -> &'static str {
     // 1. 已读：自己发的消息 pts <= 对方 read cursor
@@ -47,14 +43,22 @@ fn status_color(label: &str) -> Color {
     }
 }
 
-/// Render one timeline row in a WeChat-like bubble style.
+/// Render one timeline row. 顶部按 `MessageRenderType` 分派：
+/// - `Revoked` / `System` 走各自的整行布局，跳过 footer / 菜单 / 撤回 / 重试
+/// - `Bubble` 走常规 avatar + 气泡外壳
 pub fn view<'a>(
     message: &'a MessageVm,
-    opened_menu_message_id: Option<u64>,
     render_media_preview: bool,
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
     peer_last_read_pts: Option<u64>,
+    playing_voice_message_id: Option<u64>,
 ) -> Element<'a, AppMessage> {
+    match bubbles::render_type(message) {
+        MessageRenderType::Revoked => return revoked_row(message),
+        MessageRenderType::System => return system_row(message),
+        MessageRenderType::Bubble => {}
+    }
+
     let bubble_bg = if message.is_own {
         Color::from_rgb8(0x95, 0xEC, 0x69)
     } else {
@@ -67,171 +71,46 @@ pub fn view<'a>(
     };
 
     let time_text = format_message_time(message.created_at);
-    let footer: Option<Element<'_, AppMessage>> = if message.is_deleted {
-        None
-    } else if message.is_own {
+    let footer: Element<'_, AppMessage> = if message.is_own {
         let status_label = resolve_outgoing_status(message, peer_last_read_pts);
-
-        Some(
-            container(
-                row![
-                    text(time_text)
-                        .size(11)
-                        .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
-                    text(status_label)
-                        .size(11)
-                        .color(status_color(status_label)),
-                ]
-                .spacing(8),
-            )
-            .width(Length::Fill)
-            .align_x(alignment::Horizontal::Left)
-            .into(),
-        )
-    } else {
-        Some(
-            container(
+        container(
+            row![
                 text(time_text)
                     .size(11)
-                    .color(Color::from_rgb8(0x8E, 0x95, 0x9E)),
-            )
-            .width(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .into(),
+                    .color(Color::from_rgba8(0x1A, 0x20, 0x18, 0.62)),
+                text(status_label)
+                    .size(11)
+                    .color(status_color(status_label)),
+            ]
+            .spacing(8),
         )
-    };
-
-    let content: Element<'_, AppMessage> = if message.is_deleted {
-        text("消息已撤回")
-        .size(14)
-        .color(if message.is_own {
-            Color::from_rgb8(0x2D, 0x36, 0x2D)
-        } else {
-            Color::from_rgb8(0xB7, 0xBE, 0xC8)
-        })
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Left)
         .into()
-    } else if message.message_type == IMAGE_MESSAGE_TYPE {
-        if render_media_preview
-            && (message.local_thumbnail_path.is_some()
-                || message.media_local_path.is_some()
-                || message.media_url.is_some())
-        {
-            // Use cached decoded Handle if available; otherwise show placeholder
-            let preview: Element<'_, AppMessage> = if let Some(handle) = image_cache.get(&message.message_id) {
-                image(handle.clone())
-                    .width(Length::Fixed(220.0))
-                    .height(Length::Fixed(160.0))
-                    .content_fit(iced::ContentFit::Cover)
-                    .into()
-            } else {
-                container(
-                    text("[加载中...]")
-                        .size(14)
-                        .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
-                )
-                .width(Length::Fixed(220.0))
-                .height(Length::Fixed(80.0))
-                .align_x(alignment::Horizontal::Center)
-                .align_y(alignment::Vertical::Center)
-                .style(|_| container::Style {
-                    background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
-                    border: border::rounded(8.0),
-                    ..container::Style::default()
-                })
-                .into()
-            };
-            button(preview)
-                .style(navless_button_style)
-                .on_press(AppMessage::OpenImagePreview {
-                    message_id: message.message_id,
-                    original_path: message.media_local_path.clone(),
-                    thumbnail_path: message.local_thumbnail_path.clone(),
-                    media_url: message.media_url.clone(),
-                    file_id: message.media_file_id,
-                    created_at: message.created_at,
-                })
-                .into()
-        } else if message.local_thumbnail_path.is_some()
-            || message.media_local_path.is_some()
-            || message.media_url.is_some()
-        {
-            container(
-                text("[图片]")
-                    .size(14)
-                    .color(Color::from_rgb8(0xE3, 0xE8, 0xEE)),
-            )
-            .width(Length::Fixed(220.0))
-            .height(Length::Fixed(64.0))
-            .align_x(alignment::Horizontal::Center)
-            .align_y(alignment::Vertical::Center)
-            .style(|_| container::Style {
-                background: Some(Background::Color(Color::from_rgb8(0x2B, 0x31, 0x39))),
-                border: border::rounded(8.0),
-                ..container::Style::default()
-            })
-            .into()
-        } else {
-            text(&message.body)
-                .size(15)
-                .line_height(iced::widget::text::LineHeight::Relative(1.28))
-                .color(bubble_text)
-                .into()
-        }
-    } else if matches!(message.message_type, FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE) {
-        let file_action_label = if message.media_local_path.is_some() {
-            "打开"
-        } else {
-            "下载"
-        };
-        let action_button = button(text(file_action_label).size(12))
-            .style(retry_button_style)
-            .on_press(AppMessage::OpenAttachment {
-                message_id: message.message_id,
-                created_at: message.created_at,
-                local_path: message.media_local_path.clone(),
-                file_id: message.media_file_id,
-                filename: Some(message.body.clone()),
-            });
-
-        let mut meta_col = column![
-            action_button,
-            text(&message.body)
-                .size(15)
-                .line_height(iced::widget::text::LineHeight::Relative(1.28))
-                .color(bubble_text)
-        ]
-        .spacing(4);
-        if let Some(size) = message.media_file_size {
-            meta_col = meta_col.push(text(format_file_size(size)).size(12).color(
-                if message.is_own {
-                    Color::from_rgb8(0x22, 0x2A, 0x20)
-                } else {
-                    Color::from_rgb8(0xB8, 0xC0, 0xCC)
-                },
-            ));
-        }
-        button(meta_col)
-            .style(navless_button_style)
-            .on_press(AppMessage::OpenAttachment {
-                message_id: message.message_id,
-                created_at: message.created_at,
-                local_path: message.media_local_path.clone(),
-                file_id: message.media_file_id,
-                filename: Some(message.body.clone()),
-            })
-            .into()
     } else {
-        text(&message.body)
-            .size(15)
-            .line_height(iced::widget::text::LineHeight::Relative(1.28))
-            .color(bubble_text)
-            .into()
+        container(
+            text(time_text)
+                .size(11)
+                .color(Color::from_rgb8(0x8E, 0x95, 0x9E)),
+        )
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Right)
+        .into()
     };
 
-    let mut bubble_content = column![content].spacing(8);
-    if let Some(footer) = footer {
-        bubble_content = bubble_content.push(footer);
-    }
+    let ctx = BubbleCtx {
+        bubble_text,
+        is_own: message.is_own,
+        render_media_preview,
+        image_cache,
+        playing_voice_message_id,
+    };
+
+    let rendered = bubbles::render(message, &ctx);
+    let content = rendered.element;
+    let is_attachment = rendered.kind.is_attachment();
+
+    let bubble_content = column![content, footer].spacing(8);
 
     let bubble = container(bubble_content)
         .max_width(560.0)
@@ -244,37 +123,8 @@ pub fn view<'a>(
 
     let mut body = column![bubble].spacing(4);
 
-    let is_attachment = matches!(
-        message.message_type,
-        IMAGE_MESSAGE_TYPE | FILE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE
-    );
-    let show_attachment_menu = opened_menu_message_id == Some(message.message_id) && is_attachment;
-    if show_attachment_menu {
-        body = body.push(
-            row![
-                small_menu_button("打开", AppMessage::AttachmentMenuOpen),
-                small_menu_button("打开所在目录", AppMessage::AttachmentMenuOpenFolder),
-                small_menu_button("另存为", AppMessage::AttachmentMenuSaveAs),
-            ]
-            .spacing(6),
-        );
-    } else if opened_menu_message_id == Some(message.message_id) && !message.is_deleted {
-        body = body.push(row![small_menu_button("复制", AppMessage::TextMenuCopy)].spacing(6));
-    }
+    // 重试按钮保留为气泡旁常驻状态图标等价物（与 privchat-app 对齐，不放在菜单里）。
     if message.is_own {
-        if !message.is_deleted {
-            if let Some(server_message_id) = message.server_message_id {
-                body = body.push(
-                    button(text("撤回").size(11))
-                        .style(retry_button_style)
-                        .on_press(AppMessage::RevokeMessagePressed {
-                            channel_id: message.channel_id,
-                            channel_type: message.channel_type,
-                            server_message_id,
-                        }),
-                );
-            }
-        }
         if let Some(send_state) = &message.send_state {
             if matches!(send_state, MessageSendStateVm::FailedRetryable { .. })
                 && message.server_message_id.is_none()
@@ -306,9 +156,6 @@ pub fn view<'a>(
     };
 
     let container_row = container(row).width(Length::Fill);
-    if message.is_deleted {
-        return container_row.into();
-    }
 
     if is_attachment {
         mouse_area(container_row)
@@ -328,6 +175,71 @@ pub fn view<'a>(
             })
             .into()
     }
+}
+
+/// 已撤回消息：保留 avatar + 气泡外壳，仅渲染灰色提示文案；右键仍触发菜单（仅"本地删除"）。
+fn revoked_row<'a>(message: &'a MessageVm) -> Element<'a, AppMessage> {
+    let bubble_bg = if message.is_own {
+        Color::from_rgb8(0x95, 0xEC, 0x69)
+    } else {
+        Color::from_rgb8(0x2F, 0x33, 0x3A)
+    };
+    let content_color = if message.is_own {
+        Color::from_rgb8(0x2D, 0x36, 0x2D)
+    } else {
+        Color::from_rgb8(0xB7, 0xBE, 0xC8)
+    };
+
+    let bubble = container(text("消息已撤回").size(14).color(content_color))
+        .max_width(560.0)
+        .padding([10, 13])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bubble_bg)),
+            border: border::rounded(7.0),
+            ..container::Style::default()
+        });
+
+    let avatar = avatar_chip(message.is_own);
+    let inner = if message.is_own {
+        row![fill(), bubble, avatar]
+            .spacing(10)
+            .align_y(alignment::Vertical::Top)
+    } else {
+        row![avatar, bubble, fill()]
+            .spacing(10)
+            .align_y(alignment::Vertical::Top)
+    };
+
+    let container_row = container(inner).width(Length::Fill);
+    mouse_area(container_row)
+        .on_right_press(AppMessage::ShowTextMenu {
+            message_id: message.message_id,
+            text: String::new(),
+        })
+        .into()
+}
+
+/// 系统消息：居中浅色药丸，无 avatar / 气泡背景 / footer / 菜单。
+/// 文案直接使用 `message.body`（由 SDK / 服务端格式化好的字符串）。
+fn system_row<'a>(message: &'a MessageVm) -> Element<'a, AppMessage> {
+    let pill = container(
+        text(&message.body)
+            .size(12)
+            .color(Color::from_rgb8(0xB0, 0xB8, 0xC2)),
+    )
+    .padding([4, 10])
+    .style(|_| container::Style {
+        background: Some(Background::Color(Color::from_rgba8(
+            0x30, 0x36, 0x3F, 0.6,
+        ))),
+        border: border::rounded(10.0),
+        ..container::Style::default()
+    });
+
+    container(pill)
+        .width(Length::Fill)
+        .align_x(alignment::Horizontal::Center)
+        .into()
 }
 
 fn avatar_chip(is_own: bool) -> Element<'static, AppMessage> {
@@ -367,39 +279,6 @@ fn retry_button_style(_theme: &Theme, status: button::Status) -> button::Style {
         border: border::rounded(6.0),
         shadow: Default::default(),
         snap: true,
-    }
-}
-
-fn navless_button_style(_theme: &Theme, _status: button::Status) -> button::Style {
-    button::Style {
-        background: None,
-        text_color: Color::TRANSPARENT,
-        border: border::width(0.0),
-        shadow: Default::default(),
-        snap: true,
-    }
-}
-
-fn small_menu_button<'a>(label: &'a str, msg: AppMessage) -> Element<'a, AppMessage> {
-    button(text(label).size(11))
-        .style(retry_button_style)
-        .on_press(msg)
-        .into()
-}
-
-fn format_file_size(bytes: u64) -> String {
-    const KB: f64 = 1024.0;
-    const MB: f64 = KB * 1024.0;
-    const GB: f64 = MB * 1024.0;
-    let b = bytes as f64;
-    if b >= GB {
-        format!("{:.1} GB", b / GB)
-    } else if b >= MB {
-        format!("{:.1} MB", b / MB)
-    } else if b >= KB {
-        format!("{:.1} KB", b / KB)
-    } else {
-        format!("{bytes} B")
     }
 }
 

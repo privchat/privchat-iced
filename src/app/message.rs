@@ -4,8 +4,8 @@ use iced::window;
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
     GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, OpenToken, PresenceVm,
-    SearchUserVm, SessionListItemVm, TimelinePatchVm, TimelineRevision, TimelineSnapshotVm,
-    UiError,
+    SearchUserVm, SessionListItemVm, TimelineItemKey, TimelinePatchVm, TimelineRevision,
+    TimelineSnapshotVm, UiError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +212,41 @@ pub enum AppMessage {
         channel_id: u64,
         channel_type: i32,
     },
+    SessionListCursorMoved(iced::Point),
+    SessionListItemRightClicked {
+        channel_id: u64,
+        channel_type: i32,
+        is_pinned: bool,
+    },
+    DismissSessionContextMenu,
+    PinChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+        pinned: bool,
+    },
+    PinChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
+    HideChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+    },
+    HideChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
+    DeleteChannelPressed {
+        channel_id: u64,
+        channel_type: i32,
+    },
+    DeleteChannelResolved {
+        channel_id: u64,
+        channel_type: i32,
+        result: Result<(), UiError>,
+    },
     ConversationOpened {
         channel_id: u64,
         channel_type: i32,
@@ -346,6 +381,7 @@ pub enum AppMessage {
         text: String,
     },
     DismissAttachmentMenu,
+    ChatCursorMoved(iced::Point),
     TextMenuCopy,
     AttachmentMenuOpen,
     AttachmentMenuOpenFolder,
@@ -484,6 +520,20 @@ pub enum AppMessage {
         server_message_id: u64,
         error: UiError,
     },
+    DeleteMessageLocalPressed {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        message_id: u64,
+        key: TimelineItemKey,
+    },
+    DeleteMessageLocalResolved {
+        channel_id: u64,
+        channel_type: i32,
+        open_token: OpenToken,
+        key: TimelineItemKey,
+        result: Result<bool, UiError>,
+    },
     GlobalMessageIngress {
         message_id: u64,
         channel_id: Option<u64>,
@@ -540,5 +590,17 @@ pub enum AppMessage {
         channel_type: i32,
         at_bottom: bool,
         near_top: bool,
+    },
+    /// 点击语音气泡的播放/停止按钮。若当前正在播放同一条则切为停止。
+    VoiceTogglePressed {
+        message_id: u64,
+        created_at: i64,
+        local_path: Option<String>,
+        file_id: Option<u64>,
+    },
+    /// 语音播放自然结束或被主动停止，清理 AppState.voice_playback。
+    VoicePlaybackFinished {
+        message_id: u64,
+        result: Result<(), UiError>,
     },
 }
