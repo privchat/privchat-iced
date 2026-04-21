@@ -324,6 +324,9 @@ pub struct ImageViewerState {
     pub original_path: Option<String>,
     pub thumbnail_path: Option<String>,
     pub title: String,
+    /// Current download progress as (bytes, total). Populated while the SDK
+    /// download is in flight; cleared once the original is ready.
+    pub download_progress: Option<(u64, Option<u64>)>,
 }
 
 #[derive(Debug, Clone)]

@@ -10,6 +10,7 @@ pub mod file;
 pub mod image;
 pub mod text;
 pub mod unknown;
+pub mod video;
 pub mod voice;
 
 /// 本地 UI 显示类型。协议/服务端不感知，仅用于渲染分派：
@@ -38,6 +39,7 @@ pub fn render_type(message: &MessageVm) -> MessageRenderType {
 pub enum BubbleKind {
     Text,
     Image,
+    Video,
     File,
     Voice,
     Unknown,
@@ -47,7 +49,7 @@ impl BubbleKind {
     /// 右键会弹"打开 / 所在目录 / 另存为"菜单的子类型。
     /// Voice 由行内播放按钮直接消费，不走附件菜单。
     pub fn is_attachment(self) -> bool {
-        matches!(self, Self::Image | Self::File)
+        matches!(self, Self::Image | Self::Video | Self::File)
     }
 }
 
@@ -76,7 +78,11 @@ pub fn render<'a>(message: &'a MessageVm, ctx: &BubbleCtx<'a>) -> BubbleContent<
             element: image::view(message, ctx),
             kind: BubbleKind::Image,
         },
-        Some(ContentMessageType::File) | Some(ContentMessageType::Video) => BubbleContent {
+        Some(ContentMessageType::Video) => BubbleContent {
+            element: video::view(message, ctx),
+            kind: BubbleKind::Video,
+        },
+        Some(ContentMessageType::File) => BubbleContent {
             element: file::view(message, ctx),
             kind: BubbleKind::File,
         },

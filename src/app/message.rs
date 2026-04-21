@@ -1,5 +1,6 @@
 use iced::widget::{image as iced_image, text_editor};
 use iced::window;
+use privchat_sdk::MediaDownloadState;
 
 use crate::presentation::vm::{
     AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm, FriendRequestItemVm,
@@ -362,7 +363,19 @@ pub enum AppMessage {
         message_id: u64,
         error: UiError,
     },
+    MediaDownloadStateChanged {
+        message_id: u64,
+        state: MediaDownloadState,
+    },
     OpenAttachment {
+        message_id: u64,
+        created_at: i64,
+        local_path: Option<String>,
+        file_id: Option<u64>,
+        filename: Option<String>,
+    },
+    /// 视频消息：下载（如未缓存）后用系统默认播放器打开。
+    OpenVideo {
         message_id: u64,
         created_at: i64,
         local_path: Option<String>,

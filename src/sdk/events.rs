@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use privchat_protocol::presence::{PresenceChangedNotification, TypingStatusNotification};
-use privchat_sdk::{ConnectionState, SdkEvent};
+use privchat_sdk::{ConnectionState, MediaDownloadState, SdkEvent};
 use tracing::{info, warn};
 
 use crate::app::message::{AppMessage, ConnectionTitleState, MessageIngressSource};
@@ -111,6 +111,7 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::MessageDelivered { .. } => "message_delivered",
         SdkEvent::TypingSent { .. } => "typing_sent",
         SdkEvent::SubscriptionMessageReceived { .. } => "subscription_message_received",
+        SdkEvent::MediaDownloadStateChanged { .. } => "media_download_state_changed",
         SdkEvent::ShutdownStarted => "shutdown_started",
         SdkEvent::ShutdownCompleted => "shutdown_completed",
     }
@@ -399,6 +400,9 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
                 },
                 None => AppMessage::Noop,
             }
+        }
+        SdkEvent::MediaDownloadStateChanged { message_id, state } => {
+            AppMessage::MediaDownloadStateChanged { message_id, state }
         }
         _ => AppMessage::Noop,
     }

@@ -1920,13 +1920,15 @@ pub fn update(
                 thumbnail_path.clone().unwrap_or_default()
             };
 
+            let will_download = !original_exists && (file_id.is_some() || media_url.is_some());
             let viewer_state = crate::app::state::ImageViewerState {
                 message_id,
                 image_path: display_path,
-                loading_original: !original_exists && (file_id.is_some() || media_url.is_some()),
+                loading_original: will_download,
                 original_path: if original_exists { original_path } else { None },
                 thumbnail_path: thumbnail_path.clone(),
                 title: "图片查看器".to_string(),
+                download_progress: None,
             };
             state.image_viewer = Some(viewer_state);
 
@@ -1936,9 +1938,9 @@ pub fn update(
             let open_task = open_task
                 .map(|wid| AppMessage::ImageViewerWindowOpened { window_id: wid });
 
-            if !original_exists {
-                // 后台下载原图
-                let user_id = state.auth.user_id.unwrap_or(0);
+            if will_download {
+                // Kick off a streaming SDK download; progress arrives via
+                // `MediaDownloadStateChanged` and is consumed by the viewer.
                 let bridge = bridge.clone();
                 let created_at_ms = if created_at > 9_999_999_999 {
                     created_at
@@ -1946,32 +1948,34 @@ pub fn update(
                     created_at * 1000
                 };
 
-                let download_task = if let Some(fid) = file_id {
-                    Task::perform(
-                        async move {
-                            let url = bridge.get_file_url(fid).await?;
-                            let target = media_image_cache_path(user_id, created_at_ms, message_id, &url)
-                                .to_string_lossy().to_string();
-                            download_image_thumbnail(message_id, url, target).await
-                        },
-                        move |result| match result {
-                            Ok(path) => AppMessage::ImageOriginalReady { message_id, local_path: path },
-                            Err(error) => AppMessage::ImageOriginalFailed { message_id, error },
-                        },
-                    )
-                } else if let Some(url) = media_url {
-                    let target = media_image_cache_path(user_id, created_at_ms, message_id, &url)
-                        .to_string_lossy().to_string();
-                    Task::perform(
-                        async move { download_image_thumbnail(message_id, url, target).await },
-                        move |result| match result {
-                            Ok(path) => AppMessage::ImageOriginalReady { message_id, local_path: path },
-                            Err(error) => AppMessage::ImageOriginalFailed { message_id, error },
-                        },
-                    )
-                } else {
-                    Task::none()
-                };
+                let download_task = Task::perform(
+                    async move {
+                        let url = if let Some(fid) = file_id {
+                            bridge.get_file_url(fid).await?
+                        } else {
+                            media_url.unwrap_or_default()
+                        };
+                        if url.is_empty() {
+                            return Err(crate::presentation::vm::UiError::Unknown(
+                                "image url missing".to_string(),
+                            ));
+                        }
+                        bridge
+                            .start_message_media_download(
+                                message_id,
+                                url,
+                                "image/*".to_string(),
+                                None,
+                                created_at_ms,
+                            )
+                            .await?;
+                        Ok::<(), crate::presentation::vm::UiError>(())
+                    },
+                    move |result| match result {
+                        Ok(()) => AppMessage::Noop,
+                        Err(error) => AppMessage::ImageOriginalFailed { message_id, error },
+                    },
+                );
 
                 Task::batch([open_task, download_task])
             } else {
@@ -2000,6 +2004,7 @@ pub fn update(
                     viewer.image_path = local_path.clone();
                     viewer.original_path = Some(local_path);
                     viewer.loading_original = false;
+                    viewer.download_progress = None;
                 }
             }
             Task::none()
@@ -2013,6 +2018,45 @@ pub fn update(
             if let Some(viewer) = &mut state.image_viewer {
                 if viewer.message_id == message_id {
                     viewer.loading_original = false;
+                    viewer.download_progress = None;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::MediaDownloadStateChanged { message_id, state: dl_state } => {
+            use privchat_sdk::MediaDownloadState as Dl;
+            // Update image viewer if this is the active preview.
+            if let Some(viewer) = &mut state.image_viewer {
+                if viewer.message_id == message_id {
+                    match &dl_state {
+                        Dl::Downloading { bytes, total } => {
+                            viewer.loading_original = true;
+                            viewer.download_progress = Some((*bytes, *total));
+                        }
+                        Dl::Paused { bytes, total } => {
+                            viewer.loading_original = true;
+                            viewer.download_progress = Some((*bytes, *total));
+                        }
+                        Dl::Done { path } => {
+                            viewer.image_path = path.clone();
+                            viewer.original_path = Some(path.clone());
+                            viewer.loading_original = false;
+                            viewer.download_progress = None;
+                        }
+                        Dl::Failed { code, message } => {
+                            tracing::warn!(
+                                "image viewer download failed message_id={} code={} message={}",
+                                message_id, code, message
+                            );
+                            viewer.loading_original = false;
+                            viewer.download_progress = None;
+                        }
+                        Dl::Idle => {
+                            viewer.loading_original = false;
+                            viewer.download_progress = None;
+                        }
+                    }
                 }
             }
             Task::none()
@@ -2044,22 +2088,76 @@ pub fn update(
                 });
             };
             let bridge = Arc::clone(bridge);
-            let uid = state.auth.user_id.unwrap_or(0);
 
             Task::perform(
                 async move {
                     let url = bridge.get_file_url(file_id).await?;
-                    let path = ensure_attachment_local_path(
-                        None,
-                        Some(url),
-                        filename,
-                        None,
-                        uid,
-                        message_id,
-                        created_at,
-                    )
-                    .await?;
+                    let path = bridge
+                        .download_message_media_blocking(
+                            message_id,
+                            url,
+                            String::new(),
+                            filename,
+                            created_at,
+                        )
+                        .await?;
                     reveal_in_file_manager(&path)?;
+                    Ok(path)
+                },
+                |result| AppMessage::AttachmentOpenResolved { result },
+            )
+        }
+
+        AppMessage::OpenVideo {
+            message_id,
+            created_at,
+            local_path,
+            file_id,
+            filename,
+        } => {
+            if let Some(local) = local_path {
+                let path = Path::new(&local);
+                if path.exists() {
+                    return match open_with_system(&local) {
+                        Ok(()) => Task::none(),
+                        Err(error) => {
+                            Task::done(AppMessage::AttachmentOpenResolved { result: Err(error) })
+                        }
+                    };
+                }
+            }
+            let Some(file_id) = file_id else {
+                return Task::done(AppMessage::AttachmentOpenResolved {
+                    result: Err(crate::presentation::vm::UiError::Unknown(
+                        "video file_id missing".to_string(),
+                    )),
+                });
+            };
+            let bridge = Arc::clone(bridge);
+
+            Task::perform(
+                async move {
+                    let url = bridge.get_file_url(file_id).await?;
+                    // Derive filename_hint from the resolved video download URL (the
+                    // bubble has no usable filename — `message.media_url` is the
+                    // thumbnail). Strip query string / fragment and require a plain
+                    // segment with an extension.
+                    let hint = url
+                        .rsplit('/')
+                        .next()
+                        .map(|s| s.split(['?', '#']).next().unwrap_or(s).to_string())
+                        .filter(|s| !s.is_empty() && s.contains('.'))
+                        .or(filename);
+                    let path = bridge
+                        .download_message_media_blocking(
+                            message_id,
+                            url,
+                            String::new(),
+                            hint,
+                            created_at,
+                        )
+                        .await?;
+                    open_with_system(&path)?;
                     Ok(path)
                 },
                 |result| AppMessage::AttachmentOpenResolved { result },
@@ -2228,21 +2326,19 @@ pub fn update(
                     let filename = menu.filename.clone();
                     let message_id = menu.message_id;
                     let created_at = menu.created_at;
-                    let uid = state.auth.user_id.unwrap_or(0);
 
                     Task::perform(
                         async move {
                             let url = bridge.get_file_url(file_id).await?;
-                            let path = ensure_attachment_local_path(
-                                None,
-                                Some(url),
-                                Some(filename),
-                                None,
-                                uid,
-                                message_id,
-                                created_at,
-                            )
-                            .await?;
+                            let path = bridge
+                                .download_message_media_blocking(
+                                    message_id,
+                                    url,
+                                    String::new(),
+                                    Some(filename),
+                                    created_at,
+                                )
+                                .await?;
                             reveal_in_file_manager(&path)?;
                             Ok(path)
                         },
@@ -2291,21 +2387,19 @@ pub fn update(
                     let filename = menu.filename.clone();
                     let message_id = menu.message_id;
                     let created_at = menu.created_at;
-                    let uid = state.auth.user_id.unwrap_or(0);
 
                     Task::perform(
                         async move {
                             let url = bridge.get_file_url(file_id).await?;
-                            let path = ensure_attachment_local_path(
-                                None,
-                                Some(url),
-                                Some(filename),
-                                None,
-                                uid,
-                                message_id,
-                                created_at,
-                            )
-                            .await?;
+                            let path = bridge
+                                .download_message_media_blocking(
+                                    message_id,
+                                    url,
+                                    String::new(),
+                                    Some(filename),
+                                    created_at,
+                                )
+                                .await?;
                             let parent = Path::new(&path)
                                 .parent()
                                 .map(|p| p.to_string_lossy().to_string())
@@ -2389,22 +2483,25 @@ pub fn update(
                     });
                 };
                 let bridge = Arc::clone(bridge);
-                let uid = state.auth.user_id.unwrap_or(0);
 
                 Task::perform(
                     async move {
                         let url = bridge.get_file_url(file_id).await?;
-                        let saved = ensure_attachment_local_path(
-                            None,
-                            Some(url),
-                            Some(filename),
-                            Some(path),
-                            uid,
-                            message_id,
-                            created_at,
-                        )
-                        .await?;
-                        Ok(saved)
+                        let canonical = bridge
+                            .download_message_media_blocking(
+                                message_id,
+                                url,
+                                String::new(),
+                                Some(filename),
+                                created_at,
+                            )
+                            .await?;
+                        fs::copy(&canonical, &path).map_err(|error| {
+                            crate::presentation::vm::UiError::Unknown(format!(
+                                "copy to save_as target failed: {error}"
+                            ))
+                        })?;
+                        Ok(path)
                     },
                     |result| AppMessage::AttachmentSaveAsResolved { result },
                 )
@@ -3034,12 +3131,11 @@ fn handle_voice_toggle(
     });
 
     let bridge = Arc::clone(bridge);
-    let uid = state.auth.user_id.unwrap_or(0);
     let filename = Some(format!("{message_id}.m4a"));
 
     Task::perform(
         async move {
-            // 1. 确保本地文件就位：已有则直接用，否则下载为 {message_id}.m4a
+            // 1. 确保本地文件就位：已有则直接用，否则通过 SDK 下载。
             let path = match local_path {
                 Some(p) if Path::new(&p).exists() => p,
                 _ => {
@@ -3049,16 +3145,15 @@ fn handle_voice_toggle(
                         )
                     })?;
                     let url = bridge.get_file_url(file_id).await?;
-                    ensure_attachment_local_path(
-                        None,
-                        Some(url),
-                        filename,
-                        None,
-                        uid,
-                        message_id,
-                        created_at,
-                    )
-                    .await?
+                    bridge
+                        .download_message_media_blocking(
+                            message_id,
+                            url,
+                            "audio/mp4".to_string(),
+                            filename,
+                            created_at,
+                        )
+                        .await?
                 }
             };
 
@@ -5183,25 +5278,6 @@ fn media_thumbnail_cache_path(
         .join(format!("thumb.{extension}"))
 }
 
-fn media_image_cache_path(
-    user_id: u64,
-    created_at_ms: i64,
-    message_id: u64,
-    media_url: &str,
-) -> PathBuf {
-    let yyyymm = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(created_at_ms)
-        .map(|dt| dt.format("%Y%m").to_string())
-        .unwrap_or_else(|| chrono::Utc::now().format("%Y%m").to_string());
-    let extension = infer_file_extension(media_url);
-    media_data_root()
-        .join("users")
-        .join(user_id.to_string())
-        .join("files")
-        .join(yyyymm)
-        .join(message_id.to_string())
-        .join(format!("image.{extension}"))
-}
-
 fn is_thumbnail_local_path(path: &str) -> bool {
     Path::new(path)
         .file_name()
@@ -5224,83 +5300,6 @@ fn media_data_root() -> PathBuf {
         return PathBuf::from(home_dir).join(".privchat-rust");
     }
     std::env::temp_dir().join("privchat-rust")
-}
-
-async fn ensure_attachment_local_path(
-    local_path: Option<String>,
-    remote_url: Option<String>,
-    filename: Option<String>,
-    save_to: Option<String>,
-    uid: u64,
-    message_id: u64,
-    created_at_ms: i64,
-) -> Result<String, crate::presentation::vm::UiError> {
-    // 1. 检查本地缓存
-    if let Some(path) = local_path {
-        let target = Path::new(&path);
-        if target.exists() {
-            return Ok(target.to_string_lossy().to_string());
-        }
-    }
-
-    let url = remote_url.ok_or_else(|| {
-        crate::presentation::vm::UiError::Unknown("attachment download url missing".to_string())
-    })?;
-
-    let response = match reqwest::get(&url).await {
-        Ok(resp) => resp,
-        Err(error) => {
-            return Err(crate::presentation::vm::UiError::Unknown(format!(
-                "error sending request for url ({url}): {error}"
-            )));
-        }
-    };
-    let response = match response.error_for_status() {
-        Ok(resp) => resp,
-        Err(error) => {
-            return Err(crate::presentation::vm::UiError::Unknown(format!(
-                "download bad status for url ({url}): {error}"
-            )));
-        }
-    };
-    let bytes = match response.bytes().await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            return Err(crate::presentation::vm::UiError::Unknown(format!(
-                "read body failed for url ({url}): {error}"
-            )));
-        }
-    };
-
-    // 2. 确定目标路径
-    let target_path = if let Some(path) = save_to {
-        // 如果指定了另存为路径，保存到该路径
-        Path::new(&path).to_path_buf()
-    } else {
-        // 否则统一保存到 Spec 定义的 message_id 目录下
-        // 路径：files/{yyyymm}/{message_id}/{filename}
-        let message_dir = privchat_sdk::media_store::ensure_attachment_dir(
-            &media_data_root(),
-            uid,
-            message_id as i64,
-            created_at_ms,
-        )
-        .map_err(|error| {
-            crate::presentation::vm::UiError::Unknown(format!("create message dir failed: {error}"))
-        })?;
-
-        let fname = filename.unwrap_or_else(|| format!("attachment_{}", message_id));
-        message_dir.join(&fname)
-    };
-
-    // 3. 写入文件
-    tokio::fs::write(&target_path, &bytes)
-        .await
-        .map_err(|error| {
-            crate::presentation::vm::UiError::Unknown(format!("write file failed: {error}"))
-        })?;
-
-    Ok(target_path.to_string_lossy().to_string())
 }
 
 fn open_with_system(target: &str) -> Result<(), crate::presentation::vm::UiError> {

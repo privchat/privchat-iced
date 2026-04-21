@@ -20,8 +20,8 @@ use privchat_protocol::rpc::{
     MessageStatusReadPtsResponse,
 };
 use privchat_sdk::{
-    NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel, StoredFriend,
-    TypingActionType, UpsertChannelInput,
+    MediaDownloadState, NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel,
+    StoredFriend, TypingActionType, UpsertChannelInput,
 };
 use tokio::sync::broadcast::error::RecvError;
 
@@ -307,6 +307,30 @@ pub trait SdkBridge: Send + Sync + 'static {
 
     async fn load_quick_phrases(&self) -> Result<Vec<String>, UiError>;
     async fn save_quick_phrases(&self, phrases: &[String]) -> Result<(), UiError>;
+
+    async fn start_message_media_download(
+        &self,
+        message_id: u64,
+        download_url: String,
+        mime: String,
+        filename_hint: Option<String>,
+        created_at_ms: i64,
+    ) -> Result<(), UiError>;
+    async fn pause_message_media_download(&self, message_id: u64);
+    async fn resume_message_media_download(&self, message_id: u64);
+    async fn cancel_message_media_download(&self, message_id: u64);
+    async fn get_media_download_state(&self, message_id: u64) -> MediaDownloadState;
+
+    /// Start a media download and block until it reaches Done or Failed.
+    /// Returns the final local path on success.
+    async fn download_message_media_blocking(
+        &self,
+        message_id: u64,
+        download_url: String,
+        mime: String,
+        filename_hint: Option<String>,
+        created_at_ms: i64,
+    ) -> Result<String, UiError>;
 }
 
 #[derive(Clone)]
@@ -2087,5 +2111,94 @@ impl SdkBridge for PrivchatSdkBridge {
         tokio::fs::write(&path, bytes).await
             .map_err(|e| UiError::Unknown(format!("保存常用语失败: {e}")))?;
         Ok(())
+    }
+
+    async fn start_message_media_download(
+        &self,
+        message_id: u64,
+        download_url: String,
+        mime: String,
+        filename_hint: Option<String>,
+        created_at_ms: i64,
+    ) -> Result<(), UiError> {
+        self.sdk
+            .start_message_media_download(message_id, download_url, mime, filename_hint, created_at_ms)
+            .await
+            .map_err(map_sdk_error)
+    }
+
+    async fn pause_message_media_download(&self, message_id: u64) {
+        self.sdk.pause_message_media_download(message_id).await;
+    }
+
+    async fn resume_message_media_download(&self, message_id: u64) {
+        self.sdk.resume_message_media_download(message_id).await;
+    }
+
+    async fn cancel_message_media_download(&self, message_id: u64) {
+        self.sdk.cancel_message_media_download(message_id).await;
+    }
+
+    async fn get_media_download_state(&self, message_id: u64) -> MediaDownloadState {
+        self.sdk.get_media_download_state(message_id).await
+    }
+
+    async fn download_message_media_blocking(
+        &self,
+        message_id: u64,
+        download_url: String,
+        mime: String,
+        filename_hint: Option<String>,
+        created_at_ms: i64,
+    ) -> Result<String, UiError> {
+        // Subscribe BEFORE starting so we don't miss the Done/Failed event.
+        let mut receiver = self.sdk.subscribe_events();
+
+        // Fast-path: if a previous Done state is still cached, reuse it.
+        if let MediaDownloadState::Done { path } =
+            self.sdk.get_media_download_state(message_id).await
+        {
+            return Ok(path);
+        }
+
+        self.sdk
+            .start_message_media_download(
+                message_id,
+                download_url,
+                mime,
+                filename_hint,
+                created_at_ms,
+            )
+            .await
+            .map_err(map_sdk_error)?;
+
+        loop {
+            match receiver.recv().await {
+                Ok(SdkEvent::MediaDownloadStateChanged { message_id: mid, state })
+                    if mid == message_id =>
+                {
+                    match state {
+                        MediaDownloadState::Done { path } => return Ok(path),
+                        MediaDownloadState::Failed { code, message } => {
+                            return Err(UiError::Unknown(format!(
+                                "media download failed code={code}: {message}"
+                            )));
+                        }
+                        MediaDownloadState::Idle => {
+                            // Cancelled by another path.
+                            return Err(UiError::Unknown(
+                                "media download cancelled".to_string(),
+                            ));
+                        }
+                        _ => continue,
+                    }
+                }
+                Ok(_) => continue,
+                Err(RecvError::Lagged(_)) => continue,
+                Err(RecvError::Closed) => {
+                    return Err(UiError::Unknown("sdk event channel closed".to_string()));
+                }
+            }
+        }
     }
 }
