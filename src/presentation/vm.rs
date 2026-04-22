@@ -145,6 +145,8 @@ pub struct MessageVm {
     pub media_file_id: Option<u64>,
     pub media_local_path: Option<String>,
     pub local_thumbnail_path: Option<String>,
+    /// 缩略图状态：0=missing 1=ready 2=failed 3=none（协议层无缩略图）
+    pub thumb_status: i32,
     pub media_file_size: Option<u64>,
     /// 语音时长（秒）。仅 Voice（语音消息）类型有效；Audio（音频文件）走文件气泡，不使用该字段。
     pub voice_duration_secs: Option<u32>,

@@ -21,8 +21,10 @@ pub fn view<'a>(message: &'a MessageVm, ctx: &BubbleCtx<'a>) -> Element<'a, AppM
         filename: None,
     };
 
+    // thumb_status=3: 协议层无缩略图，直接渲染类型化占位（不显示 loading）
+    let thumb_none = message.thumb_status == 3;
     let thumbnail: Element<'_, AppMessage> =
-        if ctx.render_media_preview {
+        if ctx.render_media_preview && !thumb_none {
             if let Some(handle) = ctx.image_cache.get(&message.message_id) {
                 image(handle.clone())
                     .width(Length::Fixed(220.0))

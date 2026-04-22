@@ -3908,6 +3908,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             media_file_id: None,
             media_local_path: None,
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: None,
             voice_duration_secs: None,
             created_at: now,
@@ -4066,6 +4067,7 @@ fn handle_send_attachment_path(
                 None
             },
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: local_file_size,
             voice_duration_secs: None,
             created_at: now,
@@ -5056,7 +5058,10 @@ fn schedule_image_decodes(state: &mut AppState) -> Vec<Task<AppMessage>> {
             let start = chat.timeline.items.len().saturating_sub(DECODE_WINDOW);
             chat.timeline.items[start..]
                 .iter()
-                .filter(|item| item.message_type == IMAGE_MESSAGE_TYPE && !item.is_deleted)
+                .filter(|item| {
+                    matches!(item.message_type, IMAGE_MESSAGE_TYPE | VIDEO_MESSAGE_TYPE)
+                        && !item.is_deleted
+                })
                 .filter(|item| {
                     !state.image_cache.contains_key(&item.message_id)
                         && !state.image_decode_pending.contains(&item.message_id)
@@ -5112,6 +5117,9 @@ fn schedule_thumbnail_download_for_message(
     bridge: &Arc<dyn SdkBridge>,
 ) -> Option<Task<AppMessage>> {
     if item.message_type != IMAGE_MESSAGE_TYPE {
+        return None;
+    }
+    if item.thumb_status == 3 {
         return None;
     }
     if let Some(thumb_path) = item.local_thumbnail_path.as_ref() {
@@ -5699,6 +5707,7 @@ mod tests {
             media_file_id: None,
             media_local_path: None,
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: None,
             created_at: 0,
             pts: None,
@@ -5730,6 +5739,7 @@ mod tests {
             media_file_id: None,
             media_local_path: None,
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: None,
             created_at,
             pts: Some(pts),
@@ -5856,6 +5866,7 @@ mod tests {
             media_file_id: None,
             media_local_path: None,
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: None,
             created_at: 0,
             pts: Some(99),
@@ -5905,6 +5916,7 @@ mod tests {
             media_file_id: None,
             media_local_path: None,
             local_thumbnail_path: None,
+            thumb_status: 0,
             media_file_size: None,
             created_at: 1,
             pts: Some(22),

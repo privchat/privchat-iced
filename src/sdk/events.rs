@@ -112,6 +112,7 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::TypingSent { .. } => "typing_sent",
         SdkEvent::SubscriptionMessageReceived { .. } => "subscription_message_received",
         SdkEvent::MediaDownloadStateChanged { .. } => "media_download_state_changed",
+        SdkEvent::MediaJobRequested { .. } => "media_job_requested",
         SdkEvent::ShutdownStarted => "shutdown_started",
         SdkEvent::ShutdownCompleted => "shutdown_completed",
     }

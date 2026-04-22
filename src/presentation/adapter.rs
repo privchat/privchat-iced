@@ -686,6 +686,7 @@ pub fn map_stored_message_to_vm(
         media_file_id,
         media_local_path,
         local_thumbnail_path,
+        thumb_status: message.thumb_status,
         media_file_size,
         voice_duration_secs,
         created_at: message.created_at,
