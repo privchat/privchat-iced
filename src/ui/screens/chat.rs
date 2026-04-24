@@ -4,7 +4,7 @@ use iced::widget::{button, column, container, image, mouse_area, row, scrollable
 use iced::{alignment, border, Background, Color, Element, Length};
 
 use crate::app::message::AppMessage;
-use crate::app::state::{AttachmentMenuState, ChatScreenState};
+use crate::app::state::{AttachmentMenuState, ChatScreenState, DeleteConfirmState};
 use crate::presentation::vm::{MessageSendStateVm, PresenceVm};
 use crate::ui::icons::{self, Icon};
 use crate::ui::widgets::{composer, timeline_list, unread_banner};
@@ -46,26 +46,56 @@ pub fn view<'a>(
     };
 
     let header_title = column![title_label, presence_status_text(presence, typing_hint),].spacing(3);
+    // 群聊右上角的「群管理」按钮：只在 channel_type==2 时展示，点击打开资料页。
+    let group_settings_btn: Option<Element<'_, AppMessage>> = if chat.channel_type == 2 {
+        let group_id = chat.channel_id;
+        let title = title.to_string();
+        Some(
+            button(text("群管理").size(12).color(Color::from_rgb8(0xDF, 0x84, 0x1C)))
+                .padding([4, 10])
+                .on_press(AppMessage::OpenGroupSettings { group_id, title })
+                .style(|_theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => {
+                            Color::from_rgb8(0x2A, 0x2E, 0x35)
+                        }
+                        _ => Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Color::from_rgb8(0xDF, 0x84, 0x1C),
+                        border: border::rounded(4.0),
+                        ..button::Style::default()
+                    }
+                })
+                .into(),
+        )
+    } else {
+        None
+    };
+    let mut header_actions = row![
+        icons::render(Icon::BubbleOutline, 26.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
+        icons::render(Icon::ChevronDown, 17.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
+        icons::render(Icon::Phone, 26.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
+    ]
+    .spacing(11)
+    .align_y(alignment::Vertical::Center);
+    if let Some(btn) = group_settings_btn {
+        header_actions = header_actions.push(btn);
+    }
+    header_actions = header_actions.push(icons::render(
+        Icon::Dots,
+        23.0,
+        Color::from_rgb8(0xA7, 0xAD, 0xB6),
+    ));
+
     let header = container(
         row![
             header_title,
-            container(
-                row![
-                    icons::render(
-                        Icon::BubbleOutline,
-                        26.0,
-                        Color::from_rgb8(0xA7, 0xAD, 0xB6)
-                    ),
-                    icons::render(Icon::ChevronDown, 17.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
-                    icons::render(Icon::Phone, 26.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
-                    icons::render(Icon::Dots, 23.0, Color::from_rgb8(0xA7, 0xAD, 0xB6)),
-                ]
-                .spacing(11)
-                .align_y(alignment::Vertical::Center),
-            )
-            .width(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
-            .align_y(alignment::Vertical::Center)
+            container(header_actions)
+                .width(Length::Fill)
+                .align_x(alignment::Horizontal::Right)
+                .align_y(alignment::Vertical::Center)
         ]
         .height(Length::Fill)
         .align_y(alignment::Vertical::Center),
@@ -88,6 +118,9 @@ pub fn view<'a>(
                 image_cache,
                 chat.peer_last_read_pts,
                 playing_voice_message_id,
+                &chat.message_reactions,
+                chat.reaction_picker_for,
+                chat.open_token,
             ),
         ]
         .height(Length::Fill),
@@ -166,6 +199,43 @@ pub fn view<'a>(
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
+    };
+
+    // @ 提及选择器：在群聊 composer 顶部悬浮；筛选为空或 DM 会话时返回 None。
+    let content: Element<'_, AppMessage> = if let Some(picker) = chat
+        .composer
+        .mention_picker
+        .as_ref()
+        .filter(|_| chat.channel_type != 1)
+    {
+        if let Some(popup) = composer::mention_picker_popup(picker) {
+            stack![
+                content,
+                container(
+                    column![
+                        container(text("")).height(Length::Fill),
+                        row![
+                            popup,
+                            container(text("")).width(Length::Fill),
+                        ]
+                        .width(Length::Fill),
+                        container(text("")).height(Length::Fixed(COMPOSER_HEIGHT)),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                )
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .padding([0, 14]),
+            ]
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+        } else {
+            content
+        }
+    } else {
+        content
     };
 
     let content: Element<'_, AppMessage> = if let Some(pending) = &chat.composer.pending_attachment
@@ -280,6 +350,33 @@ pub fn view<'a>(
             .height(Length::Fill)
             .into()
         }
+    } else {
+        content
+    };
+
+    // Delete-message confirmation dialog overlay
+    let content: Element<'_, AppMessage> = if let Some(confirm) = &chat.delete_confirm {
+        stack![
+            content,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.5))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::CancelDeleteMessageLocal),
+            container(delete_confirm_card(confirm))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center)
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
     } else {
         content
     };
@@ -524,16 +621,143 @@ fn user_profile_card<'a>(
             ..button::Style::default()
         });
 
+    // 好友设置入口：仅在资料已加载时展示；update 侧接到 OpenFriendSettings
+    // 后会解析私聊频道、初始化 mute/block 状态。
+    let settings_btn: Option<Element<'_, AppMessage>> =
+        panel.detail.as_ref().map(|detail| {
+            let title = detail.title.clone();
+            let user_id = panel.user_id;
+            button(text("好友设置").size(12).color(Color::from_rgb8(0xDF, 0x84, 0x1C)))
+                .padding([2, 8])
+                .on_press(AppMessage::OpenFriendSettings {
+                    user_id,
+                    title,
+                    avatar: String::new(),
+                    remark: String::new(),
+                })
+                .style(|_theme, status| {
+                    let bg = match status {
+                        button::Status::Hovered | button::Status::Pressed => {
+                            Color::from_rgb8(0x2A, 0x2E, 0x35)
+                        }
+                        _ => Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Color::from_rgb8(0xDF, 0x84, 0x1C),
+                        border: border::rounded(4.0),
+                        ..button::Style::default()
+                    }
+                })
+                .into()
+        });
+
+    let header_actions: Element<'_, AppMessage> = if let Some(btn) = settings_btn {
+        row![container(text("")).width(Length::Fill), btn, close_btn]
+            .spacing(6)
+            .align_y(alignment::Vertical::Center)
+            .into()
+    } else {
+        row![container(text("")).width(Length::Fill), close_btn]
+            .align_y(alignment::Vertical::Center)
+            .into()
+    };
+
     let card = column![
-        container(close_btn)
+        container(header_actions)
             .width(Length::Fill)
-            .align_x(alignment::Horizontal::Right)
             .padding(8),
         content,
     ];
 
     container(card)
         .width(Length::Fixed(340.0))
+        .style(|_| container::Style {
+            background: Some(Background::Color(C_CARD_BG)),
+            border: border::width(1.0)
+                .color(C_CARD_BORDER)
+                .rounded(12.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn delete_confirm_card<'a>(state: &'a DeleteConfirmState) -> Element<'a, AppMessage> {
+    let title = text("删除这条消息？").size(16).color(C_CARD_FIELD_VALUE);
+    let hint = text("此操作仅删除本地副本，不会影响其他人。")
+        .size(13)
+        .color(C_CARD_FIELD_LABEL);
+
+    let mut body = column![title, hint].spacing(10);
+
+    if !state.preview.trim().is_empty() {
+        body = body.push(
+            container(
+                text(state.preview.clone())
+                    .size(12)
+                    .color(C_CARD_FIELD_LABEL),
+            )
+            .padding([6, 10])
+            .max_width(360.0)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.25))),
+                border: border::rounded(6.0),
+                ..container::Style::default()
+            }),
+        );
+    }
+
+    let cancel_btn = button(text("取消").size(13).color(C_CARD_FIELD_VALUE))
+        .padding([6, 18])
+        .on_press(AppMessage::CancelDeleteMessageLocal)
+        .style(|_theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Color::from_rgb8(0x3A, 0x41, 0x4B)
+                }
+                _ => Color::from_rgb8(0x2F, 0x35, 0x3E),
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                border: border::width(1.0)
+                    .color(Color::from_rgb8(0x4A, 0x52, 0x5E))
+                    .rounded(6.0),
+                ..button::Style::default()
+            }
+        });
+
+    let delete_btn = button(text("删除").size(13).color(Color::from_rgb8(0xFF, 0xFF, 0xFF)))
+        .padding([6, 18])
+        .on_press(AppMessage::DeleteMessageLocalPressed {
+            channel_id: state.channel_id,
+            channel_type: state.channel_type,
+            open_token: state.open_token,
+            message_id: state.message_id,
+            key: state.message_key.clone(),
+        })
+        .style(|_theme, status| {
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    Color::from_rgb8(0xB9, 0x3A, 0x3A)
+                }
+                _ => Color::from_rgb8(0xD0, 0x43, 0x43),
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                border: border::rounded(6.0),
+                ..button::Style::default()
+            }
+        });
+
+    let actions = row![
+        container(text("")).width(Length::Fill),
+        cancel_btn,
+        delete_btn,
+    ]
+    .spacing(10);
+
+    container(body.push(actions).spacing(14).padding(20))
+        .max_width(420.0)
         .style(|_| container::Style {
             background: Some(Background::Color(C_CARD_BG)),
             border: border::width(1.0)
@@ -571,7 +795,16 @@ fn presence_status_text<'a>(
 fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, AppMessage)> {
     let mut items: Vec<(String, AppMessage)> = Vec::new();
 
-    let delete_local = || AppMessage::DeleteMessageLocalPressed {
+    // 本地删除走二次确认；取消发送（pending/sending）是主动放弃发送，不需要确认。
+    let request_delete_local = || AppMessage::RequestDeleteMessageLocal {
+        channel_id: menu.channel_id,
+        channel_type: menu.channel_type,
+        open_token: menu.open_token,
+        message_id: menu.message_id,
+        key: menu.message_key.clone(),
+        preview: menu.reply_preview.clone(),
+    };
+    let cancel_send_local = || AppMessage::DeleteMessageLocalPressed {
         channel_id: menu.channel_id,
         channel_type: menu.channel_type,
         open_token: menu.open_token,
@@ -580,7 +813,7 @@ fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, App
     };
 
     if menu.is_revoked {
-        items.push(("本地删除".to_string(), delete_local()));
+        items.push(("本地删除".to_string(), request_delete_local()));
         return items;
     }
 
@@ -591,7 +824,7 @@ fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, App
             | Some(MessageSendStateVm::Retrying)
     );
     if is_pending_or_sending {
-        items.push(("取消发送".to_string(), delete_local()));
+        items.push(("取消发送".to_string(), cancel_send_local()));
         return items;
     }
 
@@ -614,6 +847,36 @@ fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, App
             AppMessage::AttachmentMenuOpenFolder,
         ));
         items.push(("另存为".to_string(), AppMessage::AttachmentMenuSaveAs));
+    }
+
+    // 引用：仅对已获得 server_message_id 的非失败消息启用（local-first 发送路径需要稳定的目标 id）。
+    if !is_failed {
+        if let Some(smid) = menu.server_message_id {
+            items.push((
+                "引用".to_string(),
+                AppMessage::ReplyToMessagePressed {
+                    server_message_id: smid,
+                    from_uid: menu.from_uid,
+                    preview: menu.reply_preview.clone(),
+                },
+            ));
+            items.push((
+                "反应".to_string(),
+                AppMessage::ToggleReactionPicker {
+                    message_id: Some(menu.message_id),
+                },
+            ));
+            items.push((
+                "转发".to_string(),
+                AppMessage::OpenForwardPicker {
+                    channel_id: menu.channel_id,
+                    channel_type: menu.channel_type,
+                    message_id: menu.message_id,
+                    server_message_id: Some(smid),
+                    preview: menu.reply_preview.clone(),
+                },
+            ));
+        }
     }
 
     // 撤回：自己发送 + 未失败 + 5 分钟内 + 服务端已确认
@@ -639,7 +902,7 @@ fn build_menu_items(menu: &AttachmentMenuState, now_ms: i64) -> Vec<(String, App
         }
     }
 
-    items.push(("本地删除".to_string(), delete_local()));
+    items.push(("本地删除".to_string(), request_delete_local()));
     items
 }
 

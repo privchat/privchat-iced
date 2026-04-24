@@ -41,6 +41,7 @@ pub struct SessionListItemVm {
     pub unread_count: u32,
     pub last_msg_timestamp: i64,
     pub is_pinned: bool,
+    pub is_muted: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -77,6 +78,47 @@ pub struct GroupListItemVm {
     pub group_id: u64,
     pub title: String,
     pub subtitle: String,
+}
+
+/// 群聊 @提及候选成员。remark 非空时优先展示，否则使用 display_name。
+#[derive(Debug, Clone, Default)]
+pub struct GroupMemberVm {
+    pub user_id: u64,
+    pub display_name: String,
+    pub remark: String,
+}
+
+impl GroupMemberVm {
+    pub fn best_label(&self) -> &str {
+        if !self.remark.is_empty() {
+            &self.remark
+        } else {
+            &self.display_name
+        }
+    }
+}
+
+/// 群管理页面的成员条目：比 `GroupMemberVm` 多出角色与加入时间，用于资料页渲染。
+/// 角色字符串使用后端约定值：owner / admin / member。
+#[derive(Debug, Clone, Default)]
+pub struct GroupMemberDetailVm {
+    pub user_id: u64,
+    pub display_name: String,
+    pub avatar_url: Option<String>,
+    pub role: String,
+    pub joined_at_ms: u64,
+    pub is_muted: bool,
+}
+
+impl GroupMemberDetailVm {
+    /// 角色排序值：owner 最优先，admin 次之，其它归为 member。
+    pub fn role_rank(&self) -> u8 {
+        match self.role.as_str() {
+            "owner" => 0,
+            "admin" => 1,
+            _ => 2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -156,6 +198,9 @@ pub struct MessageVm {
     pub is_own: bool,
     pub is_deleted: bool,
     pub delivered: bool,
+    /// 引用原消息的 server_message_id（来自 MessagePayloadEnvelope.reply_to_message_id）。
+    /// 本地查找不到时渲染"已删除的消息"，不再发起单条拉取。
+    pub reply_to_server_message_id: Option<u64>,
 }
 
 impl MessageVm {
@@ -167,6 +212,50 @@ impl MessageVm {
             .and_then(ContentMessageType::from_u32)
     }
 }
+
+/// 气泡下方的单个 reaction chip。按 spec 及 privchat-ui `ReactionChip` 对齐：
+/// - `emoji`：表情 key（单一字符或组合，UTF-8）
+/// - `user_ids`：反应过该 emoji 的用户 id，顺序以最新 seq 优先
+/// - `count`：`user_ids.len()`；保留字段便于 UI 不必再算一次
+/// - `mine`：当前登录用户是否包含在 `user_ids`
+#[derive(Debug, Clone)]
+pub struct ReactionChipVm {
+    pub emoji: String,
+    pub user_ids: Vec<u64>,
+    pub count: usize,
+    pub mine: bool,
+}
+
+/// 默认反应表情（与 privchat-ui `DefaultMessageReactions` 一致）
+pub const DEFAULT_REACTION_EMOJIS: &[&str] = &["👍", "❤️", "😂", "🎉", "🔥", "👀"];
+
+/// 转发对话的目标。DirectMessage 携带对方 uid（需先 getOrCreateDirectChannel 解析出
+/// channel_id），Group 直接携带群 channel_id。与 privchat-ui `ForwardTarget` 对齐。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ForwardTarget {
+    DirectMessage(u64),
+    Group(u64),
+}
+
+/// 转发对话框中的候选条目。`section` 用于分组展示。
+#[derive(Debug, Clone)]
+pub struct ForwardTargetVm {
+    pub target: ForwardTarget,
+    pub title: String,
+    pub subtitle: String,
+    pub last_msg_timestamp: i64,
+}
+
+/// 转发 send 完成后的摘要。
+#[derive(Debug, Clone)]
+pub struct ForwardSendSummary {
+    pub success_count: usize,
+    pub failures: Vec<String>,
+}
+
+/// 转发对话框上限，与 privchat-ui `ForwardPickerPage` 保持一致。
+pub const FORWARD_MAX_TARGETS: usize = 10;
+pub const FORWARD_NOTE_MAX: usize = 200;
 
 #[derive(Debug, Clone, Default)]
 pub struct TimelineSnapshotVm {

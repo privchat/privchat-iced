@@ -2,10 +2,72 @@ use std::collections::HashMap;
 
 use iced::widget::{button, column, container, mouse_area, row, text};
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
+use privchat_protocol::message::ContentMessageType;
 
 use crate::app::message::AppMessage;
-use crate::presentation::vm::{MessageSendStateVm, MessageVm};
+use crate::presentation::vm::{
+    MessageSendStateVm, MessageVm, ReactionChipVm, DEFAULT_REACTION_EMOJIS,
+};
 use crate::ui::widgets::bubbles::{self, BubbleCtx, MessageRenderType};
+
+/// 气泡内引用条所需的最小信息。
+/// 由 timeline 批量扫描本地消息生成；原消息不在本地时用 `deleted()` 渲染"该消息已失效"。
+#[derive(Debug, Clone)]
+pub struct ReplyPreview {
+    pub body: String,
+    pub is_deleted: bool,
+}
+
+impl ReplyPreview {
+    pub fn from_message(msg: &MessageVm) -> Self {
+        let body = match msg.content_type() {
+            Some(ContentMessageType::Image) => "[图片]".to_string(),
+            Some(ContentMessageType::Video) => "[视频]".to_string(),
+            Some(ContentMessageType::Voice) => "[语音]".to_string(),
+            Some(ContentMessageType::File) => {
+                if msg.body.trim().is_empty() {
+                    "[文件]".to_string()
+                } else {
+                    msg.body.clone()
+                }
+            }
+            _ => {
+                if msg.body.trim().is_empty() {
+                    "[消息]".to_string()
+                } else {
+                    msg.body.clone()
+                }
+            }
+        };
+        Self {
+            body: truncate_preview(&body, 48),
+            is_deleted: false,
+        }
+    }
+
+    pub fn deleted() -> Self {
+        Self {
+            body: "该消息已失效".to_string(),
+            is_deleted: true,
+        }
+    }
+}
+
+fn truncate_preview(raw: &str, max_chars: usize) -> String {
+    let collapsed: String = raw
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.len() <= max_chars {
+        trimmed.to_string()
+    } else {
+        let mut s: String = chars.into_iter().take(max_chars).collect();
+        s.push('…');
+        s
+    }
+}
 
 fn resolve_outgoing_status(message: &MessageVm, peer_last_read_pts: Option<u64>) -> &'static str {
     // 1. 已读：自己发的消息 pts <= 对方 read cursor
@@ -52,6 +114,10 @@ pub fn view<'a>(
     image_cache: &'a HashMap<u64, iced::widget::image::Handle>,
     peer_last_read_pts: Option<u64>,
     playing_voice_message_id: Option<u64>,
+    reply_preview: Option<ReplyPreview>,
+    reactions: Option<&'a [ReactionChipVm]>,
+    picker_open: bool,
+    open_token: crate::presentation::vm::OpenToken,
 ) -> Element<'a, AppMessage> {
     match bubbles::render_type(message) {
         MessageRenderType::Revoked => return revoked_row(message),
@@ -110,7 +176,11 @@ pub fn view<'a>(
     let content = rendered.element;
     let is_attachment = rendered.kind.is_attachment();
 
-    let bubble_content = column![content, footer].spacing(8);
+    let bubble_content = if let Some(reply) = reply_preview {
+        column![reply_chip(&reply, message.is_own), content, footer].spacing(8)
+    } else {
+        column![content, footer].spacing(8)
+    };
 
     let bubble = container(bubble_content)
         .max_width(560.0)
@@ -122,6 +192,35 @@ pub fn view<'a>(
         });
 
     let mut body = column![bubble].spacing(4);
+
+    if picker_open {
+        if let Some(server_message_id) = message.server_message_id {
+            body = body.push(reaction_picker_bar(
+                message.channel_id,
+                message.channel_type,
+                message.message_id,
+                server_message_id,
+                open_token,
+                reactions,
+            ));
+        }
+    }
+
+    if let Some(chips) = reactions {
+        if !chips.is_empty() {
+            if let Some(server_message_id) = message.server_message_id {
+                body = body.push(reactions_row(
+                    chips,
+                    message.channel_id,
+                    message.channel_type,
+                    message.message_id,
+                    server_message_id,
+                    open_token,
+                    message.is_own,
+                ));
+            }
+        }
+    }
 
     // 重试按钮保留为气泡旁常驻状态图标等价物（与 privchat-app 对齐，不放在菜单里）。
     if message.is_own {
@@ -284,6 +383,199 @@ fn retry_button_style(_theme: &Theme, status: button::Status) -> button::Style {
 
 fn fill() -> Element<'static, AppMessage> {
     container(text("")).width(Length::Fill).into()
+}
+
+fn reply_chip(preview: &ReplyPreview, is_own: bool) -> Element<'static, AppMessage> {
+    let (bg, text_color) = if is_own {
+        (
+            Color::from_rgba8(0x0A, 0x14, 0x0B, 0.22),
+            Color::from_rgba8(0x0A, 0x14, 0x0B, if preview.is_deleted { 0.55 } else { 0.88 }),
+        )
+    } else {
+        (
+            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.12),
+            if preview.is_deleted {
+                Color::from_rgb8(0x9A, 0xA0, 0xA8)
+            } else {
+                Color::from_rgb8(0xD6, 0xDC, 0xE4)
+            },
+        )
+    };
+    let stripe_color = if preview.is_deleted {
+        Color::from_rgb8(0x6A, 0x70, 0x78)
+    } else if is_own {
+        Color::from_rgb8(0x1E, 0x7A, 0x2E)
+    } else {
+        Color::from_rgb8(0xE8, 0x8A, 0x2F)
+    };
+
+    // 固定高度保证 stripe 一定可见（Length::Fill 在无高度约束的 row 里会折成 0）。
+    let stripe = container(text(""))
+        .width(Length::Fixed(3.0))
+        .height(Length::Fixed(18.0))
+        .style(move |_| container::Style {
+            background: Some(Background::Color(stripe_color)),
+            border: border::rounded(2.0),
+            ..container::Style::default()
+        });
+
+    let body = text(preview.body.clone()).size(12).color(text_color);
+
+    container(row![stripe, body].spacing(8).align_y(alignment::Vertical::Center))
+        .max_width(520.0)
+        .padding([6, 8])
+        .style(move |_| container::Style {
+            background: Some(Background::Color(bg)),
+            border: border::rounded(5.0),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn reactions_row<'a>(
+    chips: &'a [ReactionChipVm],
+    channel_id: u64,
+    channel_type: i32,
+    message_id: u64,
+    server_message_id: u64,
+    open_token: crate::presentation::vm::OpenToken,
+    is_own: bool,
+) -> Element<'a, AppMessage> {
+    let mut rendered = row![].spacing(6);
+    for chip in chips {
+        rendered = rendered.push(reaction_chip(
+            chip,
+            channel_id,
+            channel_type,
+            message_id,
+            server_message_id,
+            open_token,
+        ));
+    }
+    let aligned = container(rendered)
+        .width(Length::Fill)
+        .align_x(if is_own {
+            alignment::Horizontal::Right
+        } else {
+            alignment::Horizontal::Left
+        });
+    aligned.into()
+}
+
+fn reaction_chip<'a>(
+    chip: &'a ReactionChipVm,
+    channel_id: u64,
+    channel_type: i32,
+    message_id: u64,
+    server_message_id: u64,
+    open_token: crate::presentation::vm::OpenToken,
+) -> Element<'a, AppMessage> {
+    let mine = chip.mine;
+    let label = if chip.count > 1 {
+        format!("{}  {}", chip.emoji, chip.count)
+    } else {
+        chip.emoji.clone()
+    };
+    let emoji_key = chip.emoji.clone();
+    button(text(label).size(12))
+        .padding([2, 8])
+        .style(move |_theme: &Theme, status| {
+            let (bg, border_color) = if mine {
+                (
+                    Color::from_rgba8(0x3C, 0x82, 0xF6, 0.18),
+                    Color::from_rgba8(0x3C, 0x82, 0xF6, 0.55),
+                )
+            } else {
+                (
+                    Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.08),
+                    Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.18),
+                )
+            };
+            let bg = match status {
+                button::Status::Hovered | button::Status::Pressed => {
+                    if mine {
+                        Color::from_rgba8(0x3C, 0x82, 0xF6, 0.30)
+                    } else {
+                        Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.14)
+                    }
+                }
+                _ => bg,
+            };
+            button::Style {
+                background: Some(Background::Color(bg)),
+                text_color: Color::from_rgb8(0xEC, 0xEF, 0xF3),
+                border: border::rounded(10.0).color(border_color).width(1.0),
+                shadow: Default::default(),
+                snap: true,
+            }
+        })
+        .on_press(AppMessage::ToggleReactionPressed {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            server_message_id,
+            emoji: emoji_key,
+            currently_mine: mine,
+        })
+        .into()
+}
+
+fn reaction_picker_bar<'a>(
+    channel_id: u64,
+    channel_type: i32,
+    message_id: u64,
+    server_message_id: u64,
+    open_token: crate::presentation::vm::OpenToken,
+    current: Option<&'a [ReactionChipVm]>,
+) -> Element<'a, AppMessage> {
+    let mut rendered = row![].spacing(6);
+    for emoji in DEFAULT_REACTION_EMOJIS {
+        let mine = current
+            .map(|chips| chips.iter().any(|c| c.emoji == *emoji && c.mine))
+            .unwrap_or(false);
+        let emoji_owned = emoji.to_string();
+        let picker_mine = mine;
+        rendered = rendered.push(
+            button(text(*emoji).size(16))
+                .padding([4, 6])
+                .style(move |_theme: &Theme, status| {
+                    let bg = match (picker_mine, status) {
+                        (true, _) => Color::from_rgba8(0x3C, 0x82, 0xF6, 0.22),
+                        (false, button::Status::Hovered | button::Status::Pressed) => {
+                            Color::from_rgba8(0xFF, 0xFF, 0xFF, 0.12)
+                        }
+                        _ => Color::TRANSPARENT,
+                    };
+                    button::Style {
+                        background: Some(Background::Color(bg)),
+                        text_color: Color::from_rgb8(0xEC, 0xEF, 0xF3),
+                        border: border::rounded(8.0),
+                        shadow: Default::default(),
+                        snap: true,
+                    }
+                })
+                .on_press(AppMessage::ToggleReactionPressed {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    message_id,
+                    server_message_id,
+                    emoji: emoji_owned,
+                    currently_mine: mine,
+                }),
+        );
+    }
+    container(rendered)
+        .padding([4, 8])
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgba8(
+                0x24, 0x28, 0x30, 0.92,
+            ))),
+            border: border::rounded(10.0),
+            ..container::Style::default()
+        })
+        .into()
 }
 
 fn format_message_time(created_at: i64) -> String {

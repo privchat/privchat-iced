@@ -11,17 +11,27 @@ use privchat_protocol::message::ContentMessageType;
 use privchat_protocol::rpc::account::user::{DetailSourceType, UserType};
 use privchat_protocol::rpc::{
     routes, AccountSearchQueryRequest, AccountSearchResponse, AccountUserDetailRequest,
-    AccountUserDetailResponse, ChannelHideRequest, ChannelHideResponse, ChannelPinRequest,
-    ChannelPinResponse, FileGetUrlRequest, FileGetUrlResponse, FriendAcceptRequest,
-    FriendAcceptResponse, FriendApplyRequest, FriendApplyResponse, FriendPendingRequest,
-    FriendPendingResponse, GetChannelPtsRequest, GetChannelPtsResponse, MessageRevokeRequest,
+    AccountUserDetailResponse, BlacklistAddRequest, BlacklistAddResponse, BlacklistRemoveRequest,
+    BlacklistRemoveResponse, ChannelHideRequest, ChannelHideResponse, ChannelMuteRequest,
+    ChannelMuteResponse, ChannelPinRequest, ChannelPinResponse, FileGetUrlRequest,
+    FileGetUrlResponse, FriendAcceptRequest, FriendAcceptResponse, FriendApplyRequest,
+    FriendApplyResponse, FriendPendingRequest, FriendPendingResponse, FriendRemoveRequest,
+    FriendRemoveResponse, GetChannelPtsRequest, GetChannelPtsResponse,
+    GroupMemberAddRequest, GroupMemberAddResponse, GroupMemberLeaveRequest,
+    GroupMemberLeaveResponse, GroupMemberListRequest, GroupMemberListResponse,
+    GroupMemberRemoveRequest, GroupMemberRemoveResponse, MessageRevokeRequest,
     MessageRevokeResponse,
     GetOrCreateDirectChannelRequest, GetOrCreateDirectChannelResponse, MessageStatusReadPtsRequest,
     MessageStatusReadPtsResponse,
 };
+use privchat_protocol::rpc::message::reaction::{
+    MessageReactionAddRequest, MessageReactionAddResponse, MessageReactionRemoveRequest,
+    MessageReactionRemoveResponse,
+};
 use privchat_sdk::{
     MediaDownloadState, NewMessage, PrivchatConfig, PrivchatSdk, SdkEvent, StoredChannel,
-    StoredFriend, TypingActionType, UpsertChannelInput,
+    StoredFriend, TypingActionType, UpsertBlacklistInput, UpsertChannelInput,
+    UpsertMessageReactionInput,
 };
 use tokio::sync::broadcast::error::RecvError;
 
@@ -30,8 +40,9 @@ use crate::config::AppConfig;
 use crate::presentation::adapter;
 use crate::presentation::vm::{
     AddFriendDetailFieldVm, AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm,
-    FriendRequestItemVm, GroupListItemVm, HistoryPageVm, LocalAccountVm, LoginSessionVm, MessageVm,
-    PresenceVm, SearchUserVm, SessionListItemVm, TimelineSnapshotVm, UiError,
+    FriendRequestItemVm, GroupListItemVm, GroupMemberDetailVm, GroupMemberVm, HistoryPageVm,
+    LocalAccountVm, LoginSessionVm, MessageVm, PresenceVm, ReactionChipVm, SearchUserVm,
+    SessionListItemVm, TimelineSnapshotVm, UiError,
 };
 
 fn map_sdk_error(err: privchat_sdk::Error) -> UiError {
@@ -204,6 +215,13 @@ pub trait SdkBridge: Send + Sync + 'static {
     async fn load_friend_list(&self) -> Result<Vec<FriendListItemVm>, UiError>;
     async fn batch_get_presence(&self, user_ids: Vec<u64>) -> Result<Vec<PresenceVm>, UiError>;
     async fn load_group_list(&self) -> Result<Vec<GroupListItemVm>, UiError>;
+    /// 群聊 @提及候选成员：只对群频道（channel_type=2）有意义。
+    /// 去除当前用户，按 remark > member_name 排序。
+    async fn load_group_members(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+    ) -> Result<Vec<GroupMemberVm>, UiError>;
     async fn load_friend_request_list(&self) -> Result<Vec<FriendRequestItemVm>, UiError>;
     async fn load_add_friend_detail(
         &self,
@@ -242,6 +260,8 @@ pub trait SdkBridge: Send + Sync + 'static {
         channel_type: i32,
         client_txn_id: ClientTxnId,
         body: String,
+        reply_to_server_message_id: Option<u64>,
+        mentioned_user_ids: Option<Vec<u64>>,
     ) -> Result<u64, UiError>;
     async fn send_attachment_message(
         &self,
@@ -260,6 +280,37 @@ pub trait SdkBridge: Send + Sync + 'static {
 
     /// 置顶/取消置顶频道：调用 RPC 并将 `top` 同步到本地 channel 表。
     async fn pin_channel(&self, channel_id: u64, pinned: bool) -> Result<(), UiError>;
+
+    /// 免打扰开关：调用 `channel/mute` RPC 并同步本地 channel.mute 字段。
+    async fn mute_channel(&self, channel_id: u64, muted: bool) -> Result<(), UiError>;
+
+    /// 删除好友：调用 `contact/friend/remove` RPC 并清理本地 friend 行。
+    async fn delete_friend(&self, friend_id: u64) -> Result<(), UiError>;
+
+    /// 拉黑用户：调用 `contact/blacklist/add` RPC 并写本地 blacklist 表。
+    async fn add_to_blacklist(&self, blocked_user_id: u64) -> Result<(), UiError>;
+
+    /// 取消拉黑：调用 `contact/blacklist/remove` RPC 并删除本地 blacklist 行。
+    async fn remove_from_blacklist(&self, blocked_user_id: u64) -> Result<(), UiError>;
+
+    /// 查询用户是否在本地黑名单中。读本地表，不触达服务端。
+    async fn is_user_blacklisted(&self, user_id: u64) -> Result<bool, UiError>;
+
+    /// 群成员详情列表（含 role / joined_at）：直接调 `group/member/list` RPC，
+    /// 服务端返回权威数据，不依赖本地 `channel_members` 表同步。
+    async fn fetch_group_members_detailed(
+        &self,
+        group_id: u64,
+    ) -> Result<Vec<GroupMemberDetailVm>, UiError>;
+
+    /// 邀请用户加入群组：调 `group/member/add`，默认 role=member。
+    async fn add_group_member(&self, group_id: u64, user_id: u64) -> Result<(), UiError>;
+
+    /// 将成员移出群组：调 `group/member/remove`。仅群主/管理员可操作，权限由服务端判定。
+    async fn remove_group_member(&self, group_id: u64, user_id: u64) -> Result<(), UiError>;
+
+    /// 主动退出群组：调 `group/member/leave`，成功后清理本地 channel / 消息目录。
+    async fn leave_group(&self, group_id: u64) -> Result<(), UiError>;
 
     /// 隐藏频道：调用 RPC 并同步写本地 hidden 标记。
     async fn hide_channel(&self, channel_id: u64) -> Result<(), UiError>;
@@ -331,6 +382,50 @@ pub trait SdkBridge: Send + Sync + 'static {
         filename_hint: Option<String>,
         created_at_ms: i64,
     ) -> Result<String, UiError>;
+
+    /// 添加消息反应：调用 `message/reaction/add` RPC，成功后写本地反应表。
+    async fn add_reaction(
+        &self,
+        server_message_id: u64,
+        channel_id: u64,
+        channel_type: i32,
+        message_id: u64,
+        my_uid: u64,
+        emoji: String,
+    ) -> Result<(), UiError>;
+
+    /// 移除消息反应：调用 `message/reaction/remove` RPC，成功后写本地墓碑行。
+    async fn remove_reaction(
+        &self,
+        server_message_id: u64,
+        channel_id: u64,
+        channel_type: i32,
+        message_id: u64,
+        my_uid: u64,
+        emoji: String,
+    ) -> Result<(), UiError>;
+
+    /// 批量从本地反应表读取并聚合为 UI chip，按 (emoji) 分组并以最新 seq 优先去重。
+    /// `my_uid` 用于标记 `mine`；0 表示未登录（永不高亮）。
+    async fn list_local_message_reactions_batch(
+        &self,
+        message_ids: Vec<u64>,
+        my_uid: u64,
+    ) -> Result<HashMap<u64, Vec<ReactionChipVm>>, UiError>;
+
+    /// 把一条本地消息转发到目标会话，返回新的本地 message_id。
+    /// 语义与 privchat-sdk-ffi 的 `forward_message` 完全一致：
+    /// 1. 读源消息，若已撤回则拒绝；
+    /// 2. 以当前登录用户为 from_uid，克隆 content / message_type / mime_type / extra / thumb_status
+    ///    调用 `create_local_message_with_id` 写入本地表；
+    /// 3. 调 `enqueue_outbound_message` 让发送链路接管；
+    /// 4. 若源消息带附件，拷贝源目录全部文件到新目录并 `update_media_downloaded=true`。
+    async fn forward_message(
+        &self,
+        src_message_id: u64,
+        target_channel_id: u64,
+        target_channel_type: i32,
+    ) -> Result<u64, UiError>;
 }
 
 #[derive(Clone)]
@@ -1165,6 +1260,39 @@ impl SdkBridge for PrivchatSdkBridge {
         Ok(groups)
     }
 
+    async fn load_group_members(
+        &self,
+        channel_id: u64,
+        channel_type: i32,
+    ) -> Result<Vec<GroupMemberVm>, UiError> {
+        let members = self
+            .sdk
+            .list_channel_members(channel_id, channel_type, 5000, 0)
+            .await
+            .map_err(map_sdk_error)?;
+        let current_uid = self.current_uid().await?;
+
+        let mut list: Vec<GroupMemberVm> = members
+            .into_iter()
+            .filter(|m| Some(m.member_uid) != current_uid && m.member_uid > 0 && !m.is_deleted)
+            .map(|m| {
+                let display_name = if !m.member_name.trim().is_empty() {
+                    m.member_name
+                } else {
+                    format!("用户 {}", m.member_uid)
+                };
+                GroupMemberVm {
+                    user_id: m.member_uid,
+                    display_name,
+                    remark: m.member_remark,
+                }
+            })
+            .collect();
+
+        list.sort_by(|a, b| a.best_label().to_lowercase().cmp(&b.best_label().to_lowercase()));
+        Ok(list)
+    }
+
     async fn load_friend_request_list(&self) -> Result<Vec<FriendRequestItemVm>, UiError> {
         let friends = self
             .sdk
@@ -1542,6 +1670,8 @@ impl SdkBridge for PrivchatSdkBridge {
         channel_type: i32,
         client_txn_id: ClientTxnId,
         body: String,
+        reply_to_server_message_id: Option<u64>,
+        mentioned_user_ids: Option<Vec<u64>>,
     ) -> Result<u64, UiError> {
         if channel_id == 0 || channel_type <= 0 {
             return Err(UiError::Unknown(format!(
@@ -1555,6 +1685,33 @@ impl SdkBridge for PrivchatSdkBridge {
             .await?
             .ok_or_else(|| UiError::Unknown("no active session user".to_string()))?;
 
+        // local-first：带引用或 @ 提及时，把内容包装成 MessagePayloadEnvelope JSON。
+        // 服务端不校验原消息存在性，仅透传 reply_to_message_id 与 mentioned_user_ids；
+        // 接收端由同步流程写 mentions 表 + extra.has_mention。
+        let has_reply = reply_to_server_message_id.is_some();
+        let has_mentions = mentioned_user_ids
+            .as_ref()
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+        let content = if has_reply || has_mentions {
+            let envelope = privchat_protocol::message::MessagePayloadEnvelope {
+                content: body,
+                metadata: None,
+                reply_to_message_id: reply_to_server_message_id.map(|id| id.to_string()),
+                mentioned_user_ids: if has_mentions {
+                    mentioned_user_ids.clone()
+                } else {
+                    None
+                },
+                message_source: None,
+            };
+            serde_json::to_string(&envelope).map_err(|err| {
+                UiError::Unknown(format!("serialize send envelope failed: {err}"))
+            })?
+        } else {
+            body
+        };
+
         let local_row_message_id = self
             .sdk
             .create_local_message_with_id(
@@ -1565,7 +1722,7 @@ impl SdkBridge for PrivchatSdkBridge {
                     // Keep aligned with privchat-app sendTextWithLocalId semantics.
                     // Server contract expects text=0.
                     message_type: TEXT_MESSAGE_TYPE,
-                    content: body,
+                    content,
                     searchable_word: String::new(),
                     setting: 0,
                     extra: String::new(),
@@ -1813,6 +1970,244 @@ impl SdkBridge for PrivchatSdkBridge {
             .set_channel_hidden(channel_id, true)
             .await
             .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn mute_channel(&self, channel_id: u64, muted: bool) -> Result<(), UiError> {
+        let ok: ChannelMuteResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::channel::MUTE,
+                &ChannelMuteRequest {
+                    user_id: 0,
+                    channel_id,
+                    muted,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("免打扰设置失败".to_string()));
+        }
+        if let Some(channel) = self
+            .sdk
+            .get_channel_by_id(channel_id)
+            .await
+            .map_err(map_sdk_error)?
+        {
+            self.sdk
+                .upsert_channel(UpsertChannelInput {
+                    channel_id: channel.channel_id,
+                    channel_type: channel.channel_type,
+                    channel_name: channel.channel_name,
+                    channel_remark: channel.channel_remark,
+                    avatar: channel.avatar,
+                    unread_count: channel.unread_count,
+                    top: channel.top,
+                    mute: if muted { 1 } else { 0 },
+                    last_msg_timestamp: channel.last_msg_timestamp,
+                    last_local_message_id: channel.last_local_message_id,
+                    last_msg_content: channel.last_msg_content,
+                    version: channel.version,
+                })
+                .await
+                .map_err(map_sdk_error)?;
+        }
+        Ok(())
+    }
+
+    async fn delete_friend(&self, friend_id: u64) -> Result<(), UiError> {
+        let ok: FriendRemoveResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::friend::DELETE,
+                &FriendRemoveRequest {
+                    friend_id,
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("删除好友失败".to_string()));
+        }
+        self.sdk
+            .delete_friend(friend_id)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn add_to_blacklist(&self, blocked_user_id: u64) -> Result<(), UiError> {
+        let current_uid = self.current_uid().await?.ok_or_else(|| {
+            UiError::Unknown("当前未登录，无法拉黑用户".to_string())
+        })?;
+        let ok: BlacklistAddResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::blacklist::ADD,
+                &BlacklistAddRequest {
+                    user_id: current_uid,
+                    blocked_user_id,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("拉黑失败".to_string()));
+        }
+        let now_ms = now_millis_i64();
+        self.sdk
+            .upsert_blacklist_entry(UpsertBlacklistInput {
+                blocked_user_id,
+                created_at: now_ms,
+                updated_at: now_ms,
+            })
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn remove_from_blacklist(&self, blocked_user_id: u64) -> Result<(), UiError> {
+        let current_uid = self.current_uid().await?.ok_or_else(|| {
+            UiError::Unknown("当前未登录，无法移除拉黑".to_string())
+        })?;
+        let ok: BlacklistRemoveResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::blacklist::REMOVE,
+                &BlacklistRemoveRequest {
+                    user_id: current_uid,
+                    blocked_user_id,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("取消拉黑失败".to_string()));
+        }
+        self.sdk
+            .delete_blacklist_entry(blocked_user_id)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn is_user_blacklisted(&self, user_id: u64) -> Result<bool, UiError> {
+        // 分页拉一次本地表，判断是否命中目标 user_id。
+        // 本地黑名单通常规模很小（常见 <100），一次性列举即可。
+        let entries = self
+            .sdk
+            .list_blacklist_entries(1024, 0)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(entries.iter().any(|e| e.blocked_user_id == user_id))
+    }
+
+    async fn fetch_group_members_detailed(
+        &self,
+        group_id: u64,
+    ) -> Result<Vec<GroupMemberDetailVm>, UiError> {
+        let resp: GroupMemberListResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::group_member::LIST,
+                &GroupMemberListRequest {
+                    group_id,
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        let mut list: Vec<GroupMemberDetailVm> = resp
+            .members
+            .into_iter()
+            .map(|m| {
+                let display_name = non_empty(Some(m.nickname.as_str()))
+                    .or_else(|| non_empty(Some(m.username.as_str())))
+                    .unwrap_or_else(|| format!("用户 {}", m.user_id));
+                GroupMemberDetailVm {
+                    user_id: m.user_id,
+                    display_name,
+                    avatar_url: m.avatar_url,
+                    role: m.role,
+                    joined_at_ms: m.joined_at,
+                    is_muted: m.is_muted,
+                }
+            })
+            .collect();
+        // 群主 > 管理员 > 普通成员，同级按名称字典序。
+        list.sort_by(|a, b| {
+            a.role_rank()
+                .cmp(&b.role_rank())
+                .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()))
+        });
+        Ok(list)
+    }
+
+    async fn add_group_member(&self, group_id: u64, user_id: u64) -> Result<(), UiError> {
+        let ok: GroupMemberAddResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::group_member::ADD,
+                &GroupMemberAddRequest {
+                    group_id,
+                    user_id,
+                    role: None,
+                    inviter_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("邀请入群失败".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn remove_group_member(&self, group_id: u64, user_id: u64) -> Result<(), UiError> {
+        let ok: GroupMemberRemoveResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::group_member::REMOVE,
+                &GroupMemberRemoveRequest {
+                    group_id,
+                    user_id,
+                    operator_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("移除成员失败".to_string()));
+        }
+        // 服务端也会下发成员变更事件，但这里同步清本地行，
+        // 让资料页再次拉取详情时更快一致。
+        self.sdk
+            .delete_group_member(group_id, user_id)
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn leave_group(&self, group_id: u64) -> Result<(), UiError> {
+        let ok: GroupMemberLeaveResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::group_member::LEAVE,
+                &GroupMemberLeaveRequest {
+                    group_id,
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        if !ok {
+            return Err(UiError::Unknown("退出群组失败".to_string()));
+        }
+        // 群频道 channel_id == group_id、channel_type == 2，
+        // 本地删除会顺带清掉消息目录（见 delete_channel_local）。
+        self.delete_channel_local(group_id).await?;
         Ok(())
     }
 
@@ -2201,4 +2596,253 @@ impl SdkBridge for PrivchatSdkBridge {
             }
         }
     }
+
+    async fn add_reaction(
+        &self,
+        server_message_id: u64,
+        channel_id: u64,
+        channel_type: i32,
+        message_id: u64,
+        my_uid: u64,
+        emoji: String,
+    ) -> Result<(), UiError> {
+        let _: MessageReactionAddResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::message_reaction::ADD,
+                &MessageReactionAddRequest {
+                    server_message_id,
+                    channel_id: Some(channel_id),
+                    emoji: emoji.clone(),
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        let now = now_millis_i64();
+        self.sdk
+            .upsert_message_reaction(UpsertMessageReactionInput {
+                channel_id,
+                channel_type,
+                uid: my_uid,
+                name: format!("u{my_uid}"),
+                emoji,
+                message_id,
+                seq: now,
+                is_deleted: false,
+                created_at: now,
+            })
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn remove_reaction(
+        &self,
+        server_message_id: u64,
+        channel_id: u64,
+        channel_type: i32,
+        message_id: u64,
+        my_uid: u64,
+        emoji: String,
+    ) -> Result<(), UiError> {
+        let _: MessageReactionRemoveResponse = self
+            .sdk
+            .rpc_call_typed(
+                routes::message_reaction::REMOVE,
+                &MessageReactionRemoveRequest {
+                    server_message_id,
+                    emoji: emoji.clone(),
+                    user_id: 0,
+                },
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        let now = now_millis_i64();
+        self.sdk
+            .upsert_message_reaction(UpsertMessageReactionInput {
+                channel_id,
+                channel_type,
+                uid: my_uid,
+                name: format!("u{my_uid}"),
+                emoji,
+                message_id,
+                seq: now,
+                is_deleted: true,
+                created_at: now,
+            })
+            .await
+            .map_err(map_sdk_error)?;
+        Ok(())
+    }
+
+    async fn list_local_message_reactions_batch(
+        &self,
+        message_ids: Vec<u64>,
+        my_uid: u64,
+    ) -> Result<HashMap<u64, Vec<ReactionChipVm>>, UiError> {
+        let mut out: HashMap<u64, Vec<ReactionChipVm>> = HashMap::new();
+        for mid in message_ids {
+            let rows = self
+                .sdk
+                .list_message_reactions(mid, 500, 0)
+                .await
+                .map_err(map_sdk_error)?;
+            // rows 顺序：seq DESC, id DESC（本地表层面）。对每个 (uid, emoji) 只保留最新行，
+            // 若最新是墓碑则跳过；聚合时按首次出现的 emoji 顺序生成 chip 列表。
+            let mut seen_pairs: HashSet<(u64, String)> = HashSet::new();
+            let mut order: Vec<String> = Vec::new();
+            let mut per_emoji: HashMap<String, Vec<u64>> = HashMap::new();
+            for row in rows {
+                let key = (row.uid, row.emoji.clone());
+                if !seen_pairs.insert(key) {
+                    continue;
+                }
+                if row.is_deleted {
+                    continue;
+                }
+                if !per_emoji.contains_key(&row.emoji) {
+                    order.push(row.emoji.clone());
+                }
+                per_emoji.entry(row.emoji).or_default().push(row.uid);
+            }
+            let chips: Vec<ReactionChipVm> = order
+                .into_iter()
+                .filter_map(|emoji| {
+                    per_emoji.remove(&emoji).map(|user_ids| {
+                        let mine = my_uid != 0 && user_ids.contains(&my_uid);
+                        ReactionChipVm {
+                            count: user_ids.len(),
+                            mine,
+                            user_ids,
+                            emoji,
+                        }
+                    })
+                })
+                .collect();
+            if !chips.is_empty() {
+                out.insert(mid, chips);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn forward_message(
+        &self,
+        src_message_id: u64,
+        target_channel_id: u64,
+        target_channel_type: i32,
+    ) -> Result<u64, UiError> {
+        if target_channel_id == 0 || target_channel_type <= 0 {
+            return Err(UiError::Unknown(format!(
+                "invalid forward target: channel_id={} channel_type={}",
+                target_channel_id, target_channel_type
+            )));
+        }
+
+        let src = self
+            .sdk
+            .get_message_by_id(src_message_id)
+            .await
+            .map_err(map_sdk_error)?
+            .ok_or_else(|| {
+                UiError::Unknown(format!("source message not found: {}", src_message_id))
+            })?;
+
+        if src.revoked {
+            return Err(UiError::Unknown(
+                "cannot forward a revoked message".to_string(),
+            ));
+        }
+
+        let from_uid = self
+            .current_uid()
+            .await?
+            .ok_or_else(|| UiError::Unknown("no active session user".to_string()))?;
+
+        let new_message_id = self
+            .sdk
+            .create_local_message_with_id(
+                NewMessage {
+                    channel_id: target_channel_id,
+                    channel_type: target_channel_type,
+                    from_uid,
+                    message_type: src.message_type,
+                    content: src.content.clone(),
+                    searchable_word: String::new(),
+                    setting: 0,
+                    extra: src.extra.clone(),
+                    mime_type: src.mime_type.clone(),
+                    media_downloaded: false,
+                    thumb_status: src.thumb_status,
+                },
+                None,
+            )
+            .await
+            .map_err(map_sdk_error)?;
+
+        self.sdk
+            .enqueue_outbound_message(new_message_id, Vec::new())
+            .await
+            .map_err(map_sdk_error)?;
+
+        if src.mime_type.is_some() {
+            let data_dir = std::env::var("PRIVCHAT_DATA_DIR").unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                format!("{}/.privchat-rust", home)
+            });
+            let root = Path::new(&data_dir);
+            let src_dir = privchat_sdk::media_store::get_canonical_message_dir(
+                root,
+                from_uid,
+                src.message_id as i64,
+                src.created_at,
+            );
+            let new_created_at = self
+                .sdk
+                .get_message_by_id(new_message_id)
+                .await
+                .map_err(map_sdk_error)?
+                .map(|m| m.created_at)
+                .unwrap_or(src.created_at);
+            if let Ok(dst_dir) = privchat_sdk::media_store::ensure_attachment_dir(
+                root,
+                from_uid,
+                new_message_id as i64,
+                new_created_at,
+            ) {
+                let mut copied_any = false;
+                if src_dir.exists() {
+                    if let Ok(entries) = std::fs::read_dir(&src_dir) {
+                        for entry in entries.flatten() {
+                            let src_path = entry.path();
+                            if src_path.is_file() {
+                                if let Some(name) = src_path.file_name() {
+                                    let dst_path = dst_dir.join(name);
+                                    if std::fs::copy(&src_path, &dst_path).is_ok() {
+                                        copied_any = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if copied_any {
+                    let _ = self
+                        .sdk
+                        .update_media_downloaded(new_message_id, true)
+                        .await;
+                }
+            }
+        }
+
+        Ok(new_message_id)
+    }
+}
+
+fn now_millis_i64() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }

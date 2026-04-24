@@ -553,6 +553,48 @@ fn extract_pts(extra: &str) -> Option<u64> {
     parsed.get("pts").and_then(|v| v.as_u64())
 }
 
+/// 从 envelope 解出 `reply_to_message_id`。
+/// - 出站消息：`content` 本身是 envelope JSON（见 bridge.rs 里的包装）
+/// - 入站消息：SDK sync 管道把 envelope.content 抠到 content，完整 JSON 落到 extra
+fn extract_reply_to_server_id(content: &str, extra: &str) -> Option<u64> {
+    if let Some(env) = parse_payload_envelope(content) {
+        if let Some(id) = env.reply_to_message_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+            tracing::info!(
+                target: "reply_debug",
+                "extract_reply_to_server_id: found in content id={} content_prefix={}",
+                id,
+                &content.chars().take(80).collect::<String>()
+            );
+            return Some(id);
+        }
+    }
+    if !extra.is_empty() {
+        if let Some(env) = parse_payload_envelope(extra) {
+            if let Some(id) = env.reply_to_message_id.as_deref().and_then(|s| s.parse::<u64>().ok()) {
+                tracing::info!(
+                    target: "reply_debug",
+                    "extract_reply_to_server_id: found in extra id={} extra_prefix={}",
+                    id,
+                    &extra.chars().take(80).collect::<String>()
+                );
+                return Some(id);
+            }
+        }
+    }
+    // 仅当内容/extra 像 envelope 但缺失 reply_to 时才打印，避免对所有普通消息刷屏。
+    let content_looks_envelope = content.trim_start().starts_with('{');
+    let extra_looks_envelope = !extra.is_empty() && extra.trim_start().starts_with('{');
+    if content_looks_envelope || extra_looks_envelope {
+        tracing::info!(
+            target: "reply_debug",
+            "extract_reply_to_server_id: miss content={} extra={}",
+            &content.chars().take(120).collect::<String>(),
+            &extra.chars().take(120).collect::<String>()
+        );
+    }
+    None
+}
+
 fn extract_revoked(content: &str, extra: &str) -> bool {
     let content_json = serde_json::from_str::<serde_json::Value>(content).ok();
     let extra_json = serde_json::from_str::<serde_json::Value>(extra).ok();
@@ -605,6 +647,7 @@ pub fn map_channel_to_session_item(channel: &StoredChannel) -> SessionListItemVm
         unread_count: channel.unread_count.max(0) as u32,
         last_msg_timestamp: channel.last_msg_timestamp,
         is_pinned: channel.top > 0,
+        is_muted: channel.mute > 0,
     }
 }
 
@@ -695,6 +738,7 @@ pub fn map_stored_message_to_vm(
         is_own,
         is_deleted: extract_revoked(&message.content, &message.extra),
         delivered: message.delivered,
+        reply_to_server_message_id: extract_reply_to_server_id(&message.content, &message.extra),
     }
 }
 

@@ -6,6 +6,7 @@ use crate::app::route::Route;
 use crate::app::state::AppState;
 use crate::ui::icons::{self, Icon};
 use crate::ui::screens::{add_friend, chat, session_list, settings};
+use crate::ui::widgets::{forward_picker, friend_settings, group_settings};
 
 const SIDEBAR_WIDTH: f32 = 70.0;
 const C_ROOT_BG: Color = Color::from_rgb8(0x1F, 0x23, 0x29);
@@ -89,7 +90,7 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
     .height(Length::Fill)
     .style(|_| panel(C_ROOT_BG));
 
-    if state.overlay.settings_menu_open {
+    let composed: Element<'_, AppMessage> = if state.overlay.settings_menu_open {
         stack![
             workspace,
             mouse_area(container(text("")).width(Length::Fill).height(Length::Fill))
@@ -101,6 +102,84 @@ pub fn view(state: &AppState) -> Element<'_, AppMessage> {
         .into()
     } else {
         workspace.into()
+    };
+
+    let composed: Element<'_, AppMessage> = if let Some(picker) = state.forward_picker.as_ref() {
+        stack![
+            composed,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.5))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::DismissForwardPicker),
+            container(forward_picker::view(picker))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        composed
+    };
+
+    let composed: Element<'_, AppMessage> = if let Some(panel) = state.friend_settings.as_ref() {
+        stack![
+            composed,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.5))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::DismissFriendSettings),
+            container(friend_settings::view(panel))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        composed
+    };
+
+    if let Some(panel) = state.group_settings.as_ref() {
+        stack![
+            composed,
+            mouse_area(
+                container(text(""))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(|_| container::Style {
+                        background: Some(Background::Color(Color::from_rgba8(0, 0, 0, 0.5))),
+                        ..container::Style::default()
+                    })
+            )
+            .on_press(AppMessage::DismissGroupSettings),
+            container(group_settings::view(panel))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_x(alignment::Horizontal::Center)
+                .align_y(alignment::Vertical::Center),
+        ]
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .into()
+    } else {
+        composed
     }
 }
 

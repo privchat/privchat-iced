@@ -2,7 +2,7 @@ use iced::widget::{button, column, container, mouse_area, row, scrollable, text,
 use iced::{alignment, border, Background, Color, Element, Length, Theme};
 
 use crate::app::message::AppMessage;
-use crate::app::state::ComposerState;
+use crate::app::state::{ComposerState, MentionPickerState};
 use crate::ui::icons::{self, Icon};
 
 /// Render WeChat-like composer: toolbar + input + send button.
@@ -24,6 +24,69 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
     .spacing(12)
     .padding([2, 0])
     .align_y(alignment::Vertical::Center);
+
+    let reply_banner: Option<Element<'_, AppMessage>> =
+        composer.pending_reply.as_ref().map(|reply| {
+            let raw = reply.preview.replace('\n', " ");
+            let preview = if raw.chars().count() > 48 {
+                let truncated: String = raw.chars().take(48).collect();
+                format!("{}…", truncated)
+            } else {
+                raw
+            };
+            container(
+                row![
+                    container(text(""))
+                        .width(Length::Fixed(3.0))
+                        .height(Length::Fixed(22.0))
+                        .style(|_| container::Style {
+                            background: Some(Background::Color(Color::from_rgb8(
+                                0xDF, 0x84, 0x1C,
+                            ))),
+                            ..container::Style::default()
+                        }),
+                    text(format!("引用: {}", preview))
+                        .size(12)
+                        .color(Color::from_rgb8(0xC1, 0xC8, 0xD2)),
+                    container(text(""))
+                        .width(Length::Fill),
+                    button(
+                        text("\u{00D7}")
+                            .size(14)
+                            .color(Color::from_rgb8(0x8E, 0x96, 0xA0)),
+                    )
+                    .padding([0, 8])
+                    .on_press(AppMessage::CancelPendingReply)
+                    .style(|_theme, status| {
+                        let bg = match status {
+                            button::Status::Hovered | button::Status::Pressed => {
+                                Color::from_rgb8(0x2A, 0x2E, 0x35)
+                            }
+                            _ => Color::TRANSPARENT,
+                        };
+                        button::Style {
+                            background: Some(Background::Color(bg)),
+                            text_color: Color::from_rgb8(0x8E, 0x96, 0xA0),
+                            border: border::rounded(4.0),
+                            shadow: Default::default(),
+                            snap: true,
+                        }
+                    }),
+                ]
+                .spacing(8)
+                .align_y(alignment::Vertical::Center),
+            )
+            .padding([6, 10])
+            .width(Length::Fill)
+            .style(|_| container::Style {
+                background: Some(Background::Color(Color::from_rgb8(0x1C, 0x20, 0x26))),
+                border: border::width(1.0)
+                    .color(Color::from_rgb8(0x2E, 0x33, 0x3A))
+                    .rounded(6.0),
+                ..container::Style::default()
+            })
+            .into()
+        });
 
     let send_enabled = !composer.sending_disabled && !composer.draft.trim().is_empty();
     let editor = text_editor(&composer.editor)
@@ -71,16 +134,82 @@ pub fn view(composer: &ComposerState) -> Element<'_, AppMessage> {
     .height(Length::Fill)
     .align_y(alignment::Vertical::Bottom);
 
-    composer_shell(
-        column![top_line, toolbar, editor_row]
-            .spacing(10)
-            .padding([8, 14])
-            .into(),
-    )
+    let mut layout = column![top_line, toolbar].spacing(10);
+    if let Some(banner) = reply_banner {
+        layout = layout.push(banner);
+    }
+    layout = layout.push(editor_row);
+
+    composer_shell(layout.padding([8, 14]).into())
 }
 
 pub fn emoji_picker_popup() -> Element<'static, AppMessage> {
     emoji_picker()
+}
+
+/// @ 提及选择器：锚定在输入框上方，无候选时返回 None（调用方不渲染）。
+pub fn mention_picker_popup<'a>(state: &'a MentionPickerState) -> Option<Element<'a, AppMessage>> {
+    if state.filtered.is_empty() {
+        return None;
+    }
+
+    let mut items: Vec<Element<'a, AppMessage>> = Vec::new();
+    for member in &state.filtered {
+        let label = {
+            let l = member.best_label();
+            if l.is_empty() {
+                format!("用户{}", member.user_id)
+            } else {
+                l.to_string()
+            }
+        };
+        let row_content = container(
+            text(label)
+                .size(14)
+                .color(Color::from_rgb8(0xE0, 0xE4, 0xEA)),
+        )
+        .padding([8, 12])
+        .width(Length::Fill);
+        let user_id = member.user_id;
+        let pressable = button(row_content)
+            .padding(0)
+            .width(Length::Fill)
+            .on_press(AppMessage::MentionPickerPicked { user_id })
+            .style(|_theme, status| {
+                let bg = match status {
+                    button::Status::Hovered | button::Status::Pressed => {
+                        Color::from_rgb8(0x2A, 0x2E, 0x35)
+                    }
+                    _ => Color::TRANSPARENT,
+                };
+                button::Style {
+                    background: Some(Background::Color(bg)),
+                    text_color: Color::from_rgb8(0xE0, 0xE4, 0xEA),
+                    border: border::rounded(0.0),
+                    shadow: Default::default(),
+                    snap: true,
+                }
+            });
+        items.push(pressable.into());
+    }
+
+    let list = scrollable(column(items).width(Length::Fill));
+    let popup = container(list)
+        .width(Length::Fixed(280.0))
+        .max_height(220.0)
+        .style(|_| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(0x22, 0x26, 0x2D))),
+            border: border::width(1.0)
+                .rounded(8.0)
+                .color(Color::from_rgb8(0x3B, 0x41, 0x49)),
+            shadow: iced::Shadow {
+                color: Color::from_rgba8(0, 0, 0, 0.35),
+                offset: iced::Vector::new(0.0, 3.0),
+                blur_radius: 10.0,
+            },
+            ..container::Style::default()
+        });
+    Some(popup.into())
 }
 
 fn composer_shell(content: Element<'_, AppMessage>) -> Element<'_, AppMessage> {

@@ -15,13 +15,14 @@ use crate::app::message::{AppMessage, MessageIngressSource};
 use crate::app::reporting::{self, TimelinePatchKind};
 use crate::app::route::Route;
 use crate::app::state::{
-    AppState, ChatScreenState, ComposerState, PendingAttachmentState, RuntimeMessageIndex,
-    TimelineState,
+    AppState, ChatScreenState, ComposerState, ForwardPickerState, FriendSettingsState,
+    GroupSettingsState, PendingAttachmentState, RuntimeMessageIndex, TimelineState,
 };
 use crate::audio;
 use crate::presentation::vm::{
-    AddFriendSelectionVm, ClientTxnId, MessageSendStateVm, MessageVm, OpenToken, TimelineItemKey,
-    TimelinePatchVm, UiError, UnreadMarkerVm,
+    AddFriendSelectionVm, ClientTxnId, ForwardSendSummary, ForwardTarget, MessageSendStateVm,
+    MessageVm, OpenToken, TimelineItemKey, TimelinePatchVm, UiError, UnreadMarkerVm,
+    FORWARD_MAX_TARGETS, FORWARD_NOTE_MAX,
 };
 use crate::sdk::bridge::SdkBridge;
 use crate::sdk::events;
@@ -1062,6 +1063,11 @@ pub fn update(
                     ));
                 }
             }
+            tasks.push(Task::done(AppMessage::RequestReactionsRefresh {
+                channel_id,
+                channel_type,
+                open_token,
+            }));
             Task::batch(tasks)
         }
 
@@ -2178,7 +2184,7 @@ pub fn update(
                     .iter()
                     .find(|m| m.message_id == message_id)
                     .cloned();
-                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state) =
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state, from_uid) =
                     if let Some(msg) = snapshot {
                         (
                             msg.channel_id,
@@ -2188,9 +2194,10 @@ pub fn update(
                             msg.is_own,
                             msg.is_deleted,
                             msg.send_state,
+                            msg.from_uid,
                         )
                     } else {
-                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None)
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None, 0)
                     };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
@@ -2206,9 +2213,11 @@ pub fn update(
                     created_at,
                     local_path,
                     file_id,
-                    filename,
+                    filename: filename.clone(),
                     copy_text: None,
                     anchor_pos: chat.last_cursor_pos,
+                    from_uid,
+                    reply_preview: filename,
                 });
             }
             Task::none()
@@ -2222,7 +2231,7 @@ pub fn update(
                     .iter()
                     .find(|m| m.message_id == message_id)
                     .cloned();
-                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state, created_at) =
+                let (channel_id, channel_type, message_key, server_message_id, is_own, is_revoked, send_state, created_at, from_uid) =
                     if let Some(msg) = snapshot {
                         (
                             msg.channel_id,
@@ -2233,9 +2242,10 @@ pub fn update(
                             msg.is_deleted,
                             msg.send_state,
                             msg.created_at,
+                            msg.from_uid,
                         )
                     } else {
-                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None, 0)
+                        (chat.channel_id, chat.channel_type, crate::presentation::vm::TimelineItemKey::default(), None, false, false, None, 0, 0)
                     };
                 chat.attachment_menu = Some(crate::app::state::AttachmentMenuState {
                     message_id,
@@ -2252,8 +2262,10 @@ pub fn update(
                     local_path: None,
                     file_id: None,
                     filename: String::new(),
-                    copy_text: Some(text),
+                    copy_text: Some(text.clone()),
                     anchor_pos: chat.last_cursor_pos,
+                    from_uid,
+                    reply_preview: text,
                 });
             }
             Task::none()
@@ -2262,6 +2274,29 @@ pub fn update(
         AppMessage::DismissAttachmentMenu => {
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::ReplyToMessagePressed {
+            server_message_id,
+            from_uid,
+            preview,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+                chat.composer.pending_reply = Some(crate::app::state::PendingReplyState {
+                    server_message_id,
+                    from_uid,
+                    preview,
+                });
+            }
+            Task::none()
+        }
+
+        AppMessage::CancelPendingReply => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.pending_reply = None;
             }
             Task::none()
         }
@@ -2762,18 +2797,107 @@ pub fn update(
 
         AppMessage::ComposerEdited { action } => {
             if let Some(chat) = &mut state.active_chat {
+                let old_draft = chat.composer.draft.clone();
                 chat.composer.editor.perform(action);
-                chat.composer.draft = chat.composer.editor.text();
+                let raw_new = chat.composer.editor.text();
+                // diff 合并：若编辑咬到了某个 span 的区间，把整段 span 从旧文本中摘掉。
+                let (merged, survivors) = crate::app::state::resolve_mention_edit(
+                    &old_draft,
+                    &raw_new,
+                    &chat.composer.mentions,
+                );
+                // 当 resolve 决定原子删除时，merged 与 raw_new 不同 —— 需要把 editor
+                // 的内容改回 merged（iced 的 text_editor 没有直接 set API，只能重建 Content）。
+                if merged != raw_new {
+                    chat.composer.editor =
+                        iced::widget::text_editor::Content::with_text(&merged);
+                }
+                chat.composer.draft = merged;
+                chat.composer.mentions = survivors;
+
+                let is_dm = chat.channel_type == 1;
+                let picker_state = if is_dm {
+                    None
+                } else {
+                    match crate::app::state::compute_mention_query(
+                        &chat.composer.draft,
+                        is_dm,
+                    ) {
+                        Some(query) => {
+                            let filtered: Vec<_> = chat
+                                .composer
+                                .group_members
+                                .iter()
+                                .filter(|m| {
+                                    crate::app::state::match_member_query(m, &query)
+                                })
+                                .cloned()
+                                .collect();
+                            Some(crate::app::state::MentionPickerState { query, filtered })
+                        }
+                        None => None,
+                    }
+                };
+                chat.composer.mention_picker = picker_state;
+
                 let is_typing = !chat.composer.draft.trim().is_empty();
                 chat.composer.typing_active = is_typing;
-                // 输入内容变化时立即上报（有输入 → typing=true，清空 → typing=false）
-                // 服务端有 500ms 限流器控制频率，客户端不做 edge 判断
                 return schedule_send_typing_task(
                     bridge,
                     chat.channel_id,
                     chat.channel_type,
                     is_typing,
                 );
+            }
+            Task::none()
+        }
+
+        AppMessage::MentionMembersLoaded { channel_id, members } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id {
+                    chat.composer.group_members = members;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::MentionPickerPicked { user_id } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_type != 1 {
+                    if let Some(member) = chat
+                        .composer
+                        .group_members
+                        .iter()
+                        .find(|m| m.user_id == user_id)
+                        .cloned()
+                    {
+                        let label = {
+                            let l = member.best_label();
+                            if l.is_empty() {
+                                format!("用户{}", user_id)
+                            } else {
+                                l.to_string()
+                            }
+                        };
+                        let (new_text, span) = crate::app::state::replace_mention_query(
+                            &chat.composer.draft,
+                            &label,
+                            user_id,
+                        );
+                        chat.composer.editor =
+                            iced::widget::text_editor::Content::with_text(&new_text);
+                        chat.composer.draft = new_text;
+                        chat.composer.mentions.push(span);
+                        chat.composer.mention_picker = None;
+                    }
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::MentionPickerDismissed => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.composer.mention_picker = None;
             }
             Task::none()
         }
@@ -2853,6 +2977,35 @@ pub fn update(
             Task::none()
         }
 
+        AppMessage::RequestDeleteMessageLocal {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            key,
+            preview,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+                chat.delete_confirm = Some(crate::app::state::DeleteConfirmState {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    message_id,
+                    message_key: key,
+                    preview,
+                });
+            }
+            Task::none()
+        }
+
+        AppMessage::CancelDeleteMessageLocal => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.delete_confirm = None;
+            }
+            Task::none()
+        }
+
         AppMessage::DeleteMessageLocalPressed {
             channel_id,
             channel_type,
@@ -2862,6 +3015,7 @@ pub fn update(
         } => {
             if let Some(chat) = &mut state.active_chat {
                 chat.attachment_menu = None;
+                chat.delete_confirm = None;
             }
             let bridge = Arc::clone(bridge);
             Task::perform(
@@ -2898,6 +3052,1018 @@ pub fn update(
                 Task::none()
             }
         },
+
+        AppMessage::ToggleReactionPicker { message_id } => {
+            if let Some(chat) = &mut state.active_chat {
+                chat.attachment_menu = None;
+                chat.reaction_picker_for = match (chat.reaction_picker_for, message_id) {
+                    (Some(current), Some(next)) if current == next => None,
+                    (_, next) => next,
+                };
+            }
+            Task::none()
+        }
+
+        AppMessage::ToggleReactionPressed {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            server_message_id,
+            emoji,
+            currently_mine,
+        } => {
+            let Some(my_uid) = state.auth.user_id else {
+                return Task::none();
+            };
+            if let Some(chat) = &mut state.active_chat {
+                chat.reaction_picker_for = None;
+            }
+            let was_add = !currently_mine;
+            let bridge_arc = Arc::clone(bridge);
+            let emoji_clone = emoji.clone();
+            Task::perform(
+                async move {
+                    if was_add {
+                        bridge_arc
+                            .add_reaction(
+                                server_message_id,
+                                channel_id,
+                                channel_type,
+                                message_id,
+                                my_uid,
+                                emoji_clone,
+                            )
+                            .await
+                    } else {
+                        bridge_arc
+                            .remove_reaction(
+                                server_message_id,
+                                channel_id,
+                                channel_type,
+                                message_id,
+                                my_uid,
+                                emoji_clone,
+                            )
+                            .await
+                    }
+                },
+                move |result| AppMessage::ReactionToggleResolved {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                    message_id,
+                    emoji: emoji.clone(),
+                    was_add,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::ReactionToggleResolved {
+            channel_id,
+            channel_type,
+            open_token,
+            message_id,
+            emoji,
+            was_add,
+            result,
+        } => match result {
+            Ok(()) => Task::done(AppMessage::RequestReactionsRefresh {
+                channel_id,
+                channel_type,
+                open_token,
+            }),
+            Err(error) => {
+                let verb = if was_add { "添加" } else { "移除" };
+                let err_text = format_ui_error(&error);
+                warn!(
+                    "reaction toggle failed: message_id={} emoji={} verb={} error={}",
+                    message_id, emoji, verb, err_text
+                );
+                let text = format!("反应{verb}失败：{err_text}");
+                append_runtime_log(state, "WARN", &text);
+                state.auth.error = Some(text);
+                Task::none()
+            }
+        },
+
+        AppMessage::RequestReactionsRefresh {
+            channel_id,
+            channel_type,
+            open_token,
+        } => {
+            let Some(chat) = state.active_chat.as_ref() else {
+                return Task::none();
+            };
+            if chat.channel_id != channel_id
+                || chat.channel_type != channel_type
+                || chat.open_token != open_token
+            {
+                return Task::none();
+            }
+            let message_ids: Vec<u64> = chat
+                .timeline
+                .items
+                .iter()
+                .filter_map(|m| m.server_message_id.map(|_| m.message_id))
+                .collect();
+            if message_ids.is_empty() {
+                return Task::none();
+            }
+            let my_uid = state.auth.user_id.unwrap_or(0);
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    bridge_arc
+                        .list_local_message_reactions_batch(message_ids, my_uid)
+                        .await
+                },
+                move |result| match result {
+                    Ok(map) => AppMessage::ReactionsBatchLoaded {
+                        channel_id,
+                        channel_type,
+                        open_token,
+                        map,
+                    },
+                    Err(error) => {
+                        warn!(
+                            "list_local_message_reactions_batch failed: {}",
+                            format_ui_error(&error)
+                        );
+                        AppMessage::Noop
+                    }
+                },
+            )
+        }
+
+        AppMessage::ReactionsBatchLoaded {
+            channel_id,
+            channel_type,
+            open_token,
+            map,
+        } => {
+            if let Some(chat) = &mut state.active_chat {
+                if chat.channel_id == channel_id
+                    && chat.channel_type == channel_type
+                    && chat.open_token == open_token
+                {
+                    chat.message_reactions = map;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::SyncMessageReactionChanged => {
+            if let Some(chat) = state.active_chat.as_ref() {
+                let channel_id = chat.channel_id;
+                let channel_type = chat.channel_type;
+                let open_token = chat.open_token;
+                Task::done(AppMessage::RequestReactionsRefresh {
+                    channel_id,
+                    channel_type,
+                    open_token,
+                })
+            } else {
+                Task::none()
+            }
+        },
+
+        AppMessage::OpenForwardPicker {
+            channel_id,
+            channel_type,
+            message_id,
+            server_message_id,
+            preview,
+        } => {
+            let token = state.allocate_open_token();
+            // 候选：从当前 session_list + add_friend 快照就地取。去重以 (channel_id)/uid 为键。
+            let recent_sessions: Vec<_> = state
+                .session_list
+                .items
+                .iter()
+                .filter(|item| item.channel_id != channel_id || item.channel_type != channel_type)
+                .cloned()
+                .collect();
+            let recent_dm_peers: HashSet<u64> = recent_sessions
+                .iter()
+                .filter(|s| s.channel_type == 1)
+                .filter_map(|s| s.peer_user_id)
+                .collect();
+            let recent_group_channels: HashSet<u64> = recent_sessions
+                .iter()
+                .filter(|s| s.channel_type == 2)
+                .map(|s| s.channel_id)
+                .collect();
+            let friends: Vec<_> = state
+                .add_friend
+                .friends
+                .iter()
+                .filter(|f| !recent_dm_peers.contains(&f.user_id))
+                .cloned()
+                .collect();
+            let groups: Vec<_> = state
+                .add_friend
+                .groups
+                .iter()
+                .filter(|g| !recent_group_channels.contains(&g.group_id))
+                .cloned()
+                .collect();
+            state.forward_picker = Some(ForwardPickerState {
+                open_token: token,
+                source_channel_id: channel_id,
+                source_channel_type: channel_type,
+                source_message_id: message_id,
+                source_server_message_id: server_message_id,
+                source_preview: preview,
+                search: String::new(),
+                recent_sessions,
+                friends,
+                groups,
+                selected: Vec::new(),
+                note: String::new(),
+                submitting: false,
+                error: None,
+            });
+            Task::none()
+        }
+
+        AppMessage::DismissForwardPicker => {
+            state.forward_picker = None;
+            Task::none()
+        }
+
+        AppMessage::ForwardSearchChanged(query) => {
+            if let Some(picker) = &mut state.forward_picker {
+                picker.search = query;
+            }
+            Task::none()
+        }
+
+        AppMessage::ForwardTargetToggled(target) => {
+            if let Some(picker) = &mut state.forward_picker {
+                if let Some(idx) = picker.selected.iter().position(|t| *t == target) {
+                    picker.selected.remove(idx);
+                    picker.error = None;
+                } else if picker.selected.len() >= FORWARD_MAX_TARGETS {
+                    picker.error = Some(format!("最多选择 {} 个目标", FORWARD_MAX_TARGETS));
+                } else {
+                    picker.selected.push(target);
+                    picker.error = None;
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ForwardNoteChanged(text) => {
+            if let Some(picker) = &mut state.forward_picker {
+                let trimmed: String = text.chars().take(FORWARD_NOTE_MAX).collect();
+                picker.note = trimmed;
+            }
+            Task::none()
+        }
+
+        AppMessage::ForwardSendPressed => {
+            let Some(picker) = state.forward_picker.as_mut() else {
+                return Task::none();
+            };
+            if picker.selected.is_empty() || picker.submitting {
+                return Task::none();
+            }
+            picker.submitting = true;
+            picker.error = None;
+            let open_token = picker.open_token;
+            let targets = picker.selected.clone();
+            let note = picker.note.trim().to_string();
+            let src_message_id = picker.source_message_id;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    let mut success_count = 0usize;
+                    let mut failures: Vec<String> = Vec::new();
+                    for target in targets {
+                        let resolved = match target {
+                            ForwardTarget::DirectMessage(peer_uid) => {
+                                match bridge_arc.get_or_create_direct_channel(peer_uid).await {
+                                    Ok(pair) => Some(pair),
+                                    Err(err) => {
+                                        failures.push(format_ui_error(&err));
+                                        None
+                                    }
+                                }
+                            }
+                            ForwardTarget::Group(group_id) => Some((group_id, 2)),
+                        };
+                        let Some((channel_id, channel_type)) = resolved else {
+                            continue;
+                        };
+                        match bridge_arc
+                            .forward_message(src_message_id, channel_id, channel_type)
+                            .await
+                        {
+                            Ok(_) => {
+                                success_count += 1;
+                                if !note.is_empty() {
+                                    match bridge_arc.generate_local_message_id() {
+                                        Ok(client_txn_id) => {
+                                            if let Err(err) = bridge_arc
+                                                .send_text_message(
+                                                    channel_id,
+                                                    channel_type,
+                                                    client_txn_id,
+                                                    note.clone(),
+                                                    None,
+                                                    None,
+                                                )
+                                                .await
+                                            {
+                                                warn!(
+                                                    "forward note send failed channel_id={} err={}",
+                                                    channel_id,
+                                                    format_ui_error(&err)
+                                                );
+                                            }
+                                        }
+                                        Err(err) => warn!(
+                                            "forward note allocate id failed err={}",
+                                            format_ui_error(&err)
+                                        ),
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                failures.push(format_ui_error(&err));
+                            }
+                        }
+                    }
+                    Ok::<ForwardSendSummary, UiError>(ForwardSendSummary {
+                        success_count,
+                        failures,
+                    })
+                },
+                move |result| AppMessage::ForwardSendResolved { open_token, result },
+            )
+        }
+
+        AppMessage::ForwardSendResolved { open_token, result } => {
+            let Some(picker) = state.forward_picker.as_mut() else {
+                return Task::none();
+            };
+            if picker.open_token != open_token {
+                return Task::none();
+            }
+            picker.submitting = false;
+            match result {
+                Ok(summary) => {
+                    if summary.failures.is_empty() {
+                        state.forward_picker = None;
+                    } else {
+                        picker.error = Some(format!(
+                            "部分目标失败 ({}): {}",
+                            summary.failures.len(),
+                            summary.failures.join("; ")
+                        ));
+                    }
+                }
+                Err(err) => {
+                    picker.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        },
+
+        AppMessage::OpenFriendSettings {
+            user_id,
+            title,
+            avatar,
+            remark,
+        } => {
+            let token = state.allocate_open_token();
+            state.friend_settings = Some(FriendSettingsState {
+                open_token: token,
+                user_id,
+                title,
+                avatar,
+                remark,
+                direct_channel_id: None,
+                loading: true,
+                is_muted: false,
+                is_blacklisted: false,
+                editing_remark: false,
+                remark_input: String::new(),
+                submitting_remark: false,
+                submitting_mute: false,
+                submitting_block: false,
+                delete_confirm_open: false,
+                submitting_delete: false,
+                error: None,
+            });
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    let (direct_channel_id, _channel_type) =
+                        bridge_arc.get_or_create_direct_channel(user_id).await?;
+                    let is_blacklisted = bridge_arc.is_user_blacklisted(user_id).await?;
+                    // mute 状态：读本地 SessionList 里对应 channel 的 mute 字段。
+                    // 此处直接用 channel_id 为键从 session_list 查找会更省事，
+                    // 但 bridge 没暴露单行查询，所以退而求其次在 update 侧依据 token 派送后再查。
+                    Ok::<(u64, bool), UiError>((direct_channel_id, is_blacklisted))
+                },
+                move |result| match result {
+                    Ok((direct_channel_id, is_blacklisted)) => AppMessage::FriendSettingsLoaded {
+                        open_token: token,
+                        direct_channel_id,
+                        // mute 在 update 侧根据 session_list 填回，这里先占位 false。
+                        is_muted: false,
+                        is_blacklisted,
+                    },
+                    Err(error) => AppMessage::FriendSettingsLoadFailed {
+                        open_token: token,
+                        error,
+                    },
+                },
+            )
+        }
+
+        AppMessage::DismissFriendSettings => {
+            state.friend_settings = None;
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsLoaded {
+            open_token,
+            direct_channel_id,
+            is_muted: _is_muted_placeholder,
+            is_blacklisted,
+        } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.loading = false;
+            panel.direct_channel_id = Some(direct_channel_id);
+            panel.is_blacklisted = is_blacklisted;
+            // 用 session_list 里的 channel.mute 校准 mute 状态（bridge 加载只返回 channel_id，
+            // 没返回 mute；SessionListItemVm 里有）。
+            panel.is_muted = state
+                .session_list
+                .items
+                .iter()
+                .find(|item| item.channel_id == direct_channel_id && item.channel_type == 1)
+                .map(|item| item.is_muted)
+                .unwrap_or(false);
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsLoadFailed { open_token, error } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.loading = false;
+            panel.error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsRemarkEditPressed => {
+            if let Some(panel) = state.friend_settings.as_mut() {
+                panel.editing_remark = true;
+                panel.remark_input = panel.remark.clone();
+                panel.error = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsRemarkEditCancelled => {
+            if let Some(panel) = state.friend_settings.as_mut() {
+                panel.editing_remark = false;
+                panel.remark_input.clear();
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsRemarkInputChanged(text) => {
+            if let Some(panel) = state.friend_settings.as_mut() {
+                panel.remark_input = text;
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsRemarkSubmitPressed => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_remark {
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let user_id = panel.user_id;
+            let alias = panel.remark_input.trim().to_string();
+            panel.submitting_remark = true;
+            panel.error = None;
+            let bridge_arc = Arc::clone(bridge);
+            let alias_clone = alias.clone();
+            Task::perform(
+                async move {
+                    let ok = bridge_arc.set_friend_alias(user_id, alias_clone).await?;
+                    if !ok {
+                        return Err(UiError::Unknown("设置备注失败".to_string()));
+                    }
+                    Ok::<String, UiError>(alias)
+                },
+                move |result| AppMessage::FriendSettingsRemarkResolved {
+                    open_token: token,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::FriendSettingsRemarkResolved { open_token, result } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_remark = false;
+            match result {
+                Ok(alias) => {
+                    panel.editing_remark = false;
+                    panel.remark = alias.clone();
+                    // title 反映 remark > nickname：有备注时优先展示备注；
+                    // 清空时退回 remark_input 里原先的显示名不一定可得，这里保留 title 不覆盖。
+                    if !alias.is_empty() {
+                        panel.title = alias;
+                    }
+                    panel.remark_input.clear();
+                }
+                Err(err) => {
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsMuteToggled(muted) => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_mute {
+                return Task::none();
+            }
+            let Some(channel_id) = panel.direct_channel_id else {
+                panel.error = Some("私聊频道尚未就绪".to_string());
+                return Task::none();
+            };
+            let token = panel.open_token;
+            panel.submitting_mute = true;
+            panel.error = None;
+            // 乐观更新。
+            panel.is_muted = muted;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    bridge_arc.mute_channel(channel_id, muted).await
+                },
+                move |result| AppMessage::FriendSettingsMuteResolved {
+                    open_token: token,
+                    muted,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::FriendSettingsMuteResolved {
+            open_token,
+            muted,
+            result,
+        } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_mute = false;
+            match result {
+                Ok(()) => {
+                    // 同步本地 session_list 的 mute 字段，避免用户返回后看到旧值。
+                    if let Some(channel_id) = panel.direct_channel_id {
+                        if let Some(item) = state
+                            .session_list
+                            .items
+                            .iter_mut()
+                            .find(|i| i.channel_id == channel_id && i.channel_type == 1)
+                        {
+                            item.is_muted = muted;
+                        }
+                    }
+                }
+                Err(err) => {
+                    // 回滚。
+                    panel.is_muted = !muted;
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsBlockToggled(blocked) => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_block {
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let user_id = panel.user_id;
+            panel.submitting_block = true;
+            panel.error = None;
+            panel.is_blacklisted = blocked;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    if blocked {
+                        bridge_arc.add_to_blacklist(user_id).await
+                    } else {
+                        bridge_arc.remove_from_blacklist(user_id).await
+                    }
+                },
+                move |result| AppMessage::FriendSettingsBlockResolved {
+                    open_token: token,
+                    blocked,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::FriendSettingsBlockResolved {
+            open_token,
+            blocked,
+            result,
+        } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_block = false;
+            if let Err(err) = result {
+                panel.is_blacklisted = !blocked;
+                panel.error = Some(format_ui_error(&err));
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsDeletePressed => {
+            if let Some(panel) = state.friend_settings.as_mut() {
+                panel.delete_confirm_open = true;
+                panel.error = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsDeleteCancelled => {
+            if let Some(panel) = state.friend_settings.as_mut() {
+                panel.delete_confirm_open = false;
+            }
+            Task::none()
+        }
+
+        AppMessage::FriendSettingsDeleteConfirmed => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_delete {
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let user_id = panel.user_id;
+            panel.submitting_delete = true;
+            panel.error = None;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge_arc.delete_friend(user_id).await },
+                move |result| AppMessage::FriendSettingsDeleteResolved {
+                    open_token: token,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::FriendSettingsDeleteResolved { open_token, result } => {
+            let Some(panel) = state.friend_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_delete = false;
+            match result {
+                Ok(()) => {
+                    // 删除成功，关闭面板；好友列表在下次拉取时会刷新。
+                    state.friend_settings = None;
+                }
+                Err(err) => {
+                    panel.delete_confirm_open = false;
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::OpenGroupSettings { group_id, title } => {
+            let token = state.allocate_open_token();
+            let my_user_id = state.auth.user_id.unwrap_or(0);
+            state.group_settings = Some(GroupSettingsState {
+                open_token: token,
+                group_id,
+                title,
+                my_user_id,
+                loading: true,
+                members: Vec::new(),
+                my_role: None,
+                invite_input: String::new(),
+                submitting_invite: false,
+                submitting_remove: None,
+                leave_confirm_open: false,
+                submitting_leave: false,
+                error: None,
+            });
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move {
+                    let members = bridge_arc.fetch_group_members_detailed(group_id).await?;
+                    let my_role = members
+                        .iter()
+                        .find(|m| m.user_id == my_user_id)
+                        .map(|m| m.role.clone());
+                    Ok::<_, UiError>((members, my_role))
+                },
+                move |result| match result {
+                    Ok((members, my_role)) => AppMessage::GroupSettingsLoaded {
+                        open_token: token,
+                        members,
+                        my_role,
+                    },
+                    Err(error) => AppMessage::GroupSettingsLoadFailed {
+                        open_token: token,
+                        error,
+                    },
+                },
+            )
+        }
+
+        AppMessage::DismissGroupSettings => {
+            state.group_settings = None;
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsLoaded {
+            open_token,
+            members,
+            my_role,
+        } => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.loading = false;
+            panel.members = members;
+            panel.my_role = my_role;
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsLoadFailed { open_token, error } => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.loading = false;
+            panel.error = Some(format_ui_error(&error));
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsInviteInputChanged(text) => {
+            if let Some(panel) = state.group_settings.as_mut() {
+                panel.invite_input = text;
+            }
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsInviteSubmitPressed => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_invite {
+                return Task::none();
+            }
+            let Ok(invited_user_id) = panel.invite_input.trim().parse::<u64>() else {
+                panel.error = Some("请输入合法的用户 ID（数字）".to_string());
+                return Task::none();
+            };
+            if invited_user_id == 0 {
+                panel.error = Some("用户 ID 不能为 0".to_string());
+                return Task::none();
+            }
+            if panel.members.iter().any(|m| m.user_id == invited_user_id) {
+                panel.error = Some("该用户已在群内".to_string());
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let group_id = panel.group_id;
+            panel.submitting_invite = true;
+            panel.error = None;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge_arc.add_group_member(group_id, invited_user_id).await },
+                move |result| AppMessage::GroupSettingsInviteResolved {
+                    open_token: token,
+                    invited_user_id,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::GroupSettingsInviteResolved {
+            open_token,
+            invited_user_id: _,
+            result,
+        } => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_invite = false;
+            match result {
+                Ok(()) => {
+                    panel.invite_input.clear();
+                    // 重新拉取成员列表以同步 role / joined_at。
+                    let token = panel.open_token;
+                    let group_id = panel.group_id;
+                    let my_user_id = panel.my_user_id;
+                    let bridge_arc = Arc::clone(bridge);
+                    return Task::perform(
+                        async move {
+                            let members =
+                                bridge_arc.fetch_group_members_detailed(group_id).await?;
+                            let my_role = members
+                                .iter()
+                                .find(|m| m.user_id == my_user_id)
+                                .map(|m| m.role.clone());
+                            Ok::<_, UiError>((members, my_role))
+                        },
+                        move |result| match result {
+                            Ok((members, my_role)) => AppMessage::GroupSettingsLoaded {
+                                open_token: token,
+                                members,
+                                my_role,
+                            },
+                            Err(error) => AppMessage::GroupSettingsLoadFailed {
+                                open_token: token,
+                                error,
+                            },
+                        },
+                    );
+                }
+                Err(err) => {
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsRemoveMemberPressed(user_id) => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_remove.is_some() {
+                return Task::none();
+            }
+            if user_id == panel.my_user_id {
+                panel.error = Some("不能移除自己，请使用「退出群组」".to_string());
+                return Task::none();
+            }
+            if !panel.is_admin() {
+                panel.error = Some("仅群主或管理员可移除成员".to_string());
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let group_id = panel.group_id;
+            panel.submitting_remove = Some(user_id);
+            panel.error = None;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge_arc.remove_group_member(group_id, user_id).await },
+                move |result| AppMessage::GroupSettingsRemoveMemberResolved {
+                    open_token: token,
+                    user_id,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::GroupSettingsRemoveMemberResolved {
+            open_token,
+            user_id,
+            result,
+        } => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_remove = None;
+            match result {
+                Ok(()) => {
+                    panel.members.retain(|m| m.user_id != user_id);
+                }
+                Err(err) => {
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsLeavePressed => {
+            if let Some(panel) = state.group_settings.as_mut() {
+                panel.leave_confirm_open = true;
+                panel.error = None;
+            }
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsLeaveCancelled => {
+            if let Some(panel) = state.group_settings.as_mut() {
+                panel.leave_confirm_open = false;
+            }
+            Task::none()
+        }
+
+        AppMessage::GroupSettingsLeaveConfirmed => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.submitting_leave {
+                return Task::none();
+            }
+            let token = panel.open_token;
+            let group_id = panel.group_id;
+            panel.submitting_leave = true;
+            panel.error = None;
+            let bridge_arc = Arc::clone(bridge);
+            Task::perform(
+                async move { bridge_arc.leave_group(group_id).await },
+                move |result| AppMessage::GroupSettingsLeaveResolved {
+                    open_token: token,
+                    result,
+                },
+            )
+        }
+
+        AppMessage::GroupSettingsLeaveResolved { open_token, result } => {
+            let Some(panel) = state.group_settings.as_mut() else {
+                return Task::none();
+            };
+            if panel.open_token != open_token {
+                return Task::none();
+            }
+            panel.submitting_leave = false;
+            match result {
+                Ok(()) => {
+                    let group_id = panel.group_id;
+                    state.group_settings = None;
+                    // 关闭该群的聊天面板（如当前正在查看）。
+                    state.session_list.items.retain(|item| {
+                        !(item.channel_id == group_id && item.channel_type == 2)
+                    });
+                    if let Some(chat) = state.active_chat.as_ref() {
+                        if chat.channel_id == group_id && chat.channel_type == 2 {
+                            state.active_chat = None;
+                            state.active_read_channel_id = None;
+                            state.route = Route::SessionList;
+                        }
+                    }
+                }
+                Err(err) => {
+                    panel.leave_confirm_open = false;
+                    panel.error = Some(format_ui_error(&err));
+                }
+            }
+            Task::none()
+        }
 
         AppMessage::GlobalMessageIngress {
             message_id,
@@ -3309,6 +4475,9 @@ fn handle_conversation_selected(
         attachment_menu: None,
         user_profile_panel: None,
         last_cursor_pos: None,
+        delete_confirm: None,
+        message_reactions: std::collections::HashMap::new(),
+        reaction_picker_for: None,
     });
     clear_local_unread_for_channel(state, channel_id, channel_type);
 
@@ -3316,7 +4485,7 @@ fn handle_conversation_selected(
     // subscribe_channel and presence fetch both require network; they run after ConversationOpened.
     // Also fetch peer_read_pts for cold start display of "已读" status.
     let timeline_bridge = Arc::clone(bridge);
-    Task::perform(
+    let open_task = Task::perform(
         async move {
             let snapshot = timeline_bridge
                 .open_timeline(channel_id, channel_type)
@@ -3342,7 +4511,37 @@ fn handle_conversation_selected(
                 error,
             },
         },
-    )
+    );
+
+    // 群聊额外拉取成员列表，用于 @ 提及候选。DM 跳过。
+    if channel_type == 2 {
+        let member_bridge = Arc::clone(bridge);
+        let member_task = Task::perform(
+            async move {
+                member_bridge
+                    .load_group_members(channel_id, channel_type)
+                    .await
+            },
+            move |result: Result<_, UiError>| match result {
+                Ok(members) => AppMessage::MentionMembersLoaded { channel_id, members },
+                Err(error) => {
+                    tracing::warn!(
+                        "mention.load_group_members failed: channel_id={} channel_type={} error={}",
+                        channel_id,
+                        channel_type,
+                        format_ui_error(&error)
+                    );
+                    AppMessage::MentionMembersLoaded {
+                        channel_id,
+                        members: Vec::new(),
+                    }
+                }
+            },
+        );
+        return Task::batch([open_task, member_task]);
+    }
+
+    open_task
 }
 
 fn resolve_chat_title(state: &AppState, channel_id: u64, channel_type: i32) -> String {
@@ -3857,21 +5056,37 @@ fn schedule_typing_hint_expire_task(
 }
 
 fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Task<AppMessage> {
-    let (body, channel_id, channel_type, open_token) = match state.active_chat.as_ref() {
-        Some(chat_snapshot) => {
-            let body = chat_snapshot.composer.draft.trim().to_string();
-            if body.is_empty() {
-                return Task::none();
+    let (body, channel_id, channel_type, open_token, reply_to_for_echo, mentioned_user_ids) =
+        match state.active_chat.as_ref() {
+            Some(chat_snapshot) => {
+                let body = chat_snapshot.composer.draft.trim().to_string();
+                if body.is_empty() {
+                    return Task::none();
+                }
+                // 去重后收集现存 span 的 user_id；草稿若不含任何 span 就传 None。
+                let mut seen = std::collections::HashSet::<u64>::new();
+                let mut ids = Vec::<u64>::new();
+                for span in &chat_snapshot.composer.mentions {
+                    if seen.insert(span.user_id) {
+                        ids.push(span.user_id);
+                    }
+                }
+                let mentioned = if ids.is_empty() { None } else { Some(ids) };
+                (
+                    body,
+                    chat_snapshot.channel_id,
+                    chat_snapshot.channel_type,
+                    chat_snapshot.open_token,
+                    chat_snapshot
+                        .composer
+                        .pending_reply
+                        .as_ref()
+                        .map(|r| r.server_message_id),
+                    mentioned,
+                )
             }
-            (
-                body,
-                chat_snapshot.channel_id,
-                chat_snapshot.channel_type,
-                chat_snapshot.open_token,
-            )
-        }
-        None => return Task::none(),
-    };
+            None => return Task::none(),
+        };
     if channel_id == 0 || channel_type <= 0 {
         state.auth.error = Some(format!(
             "发送失败: 无效会话参数 channel_id={} channel_type={}",
@@ -3917,6 +5132,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             is_own: true,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: reply_to_for_echo,
         };
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
@@ -3925,6 +5141,7 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
         chat.composer.emoji_picker_open = false;
         chat.composer.quick_phrase_open = false;
         chat.composer.typing_active = false;
+        chat.composer.pending_reply = None;
     }
     touch_session_preview(state, channel_id, channel_type, &body, now);
 
@@ -3946,7 +5163,14 @@ fn handle_send_pressed(state: &mut AppState, bridge: &Arc<dyn SdkBridge>) -> Tas
             }
             // 2. 再发送实际消息
             send_bridge
-                .send_text_message(channel_id, channel_type, client_txn_id, body)
+                .send_text_message(
+                    channel_id,
+                    channel_type,
+                    client_txn_id,
+                    body,
+                    reply_to_for_echo,
+                    mentioned_user_ids,
+                )
                 .await
         },
         move |result| match result {
@@ -4076,6 +5300,7 @@ fn handle_send_attachment_path(
             is_own: true,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: None,
         };
         chat.timeline.items.push(local_echo);
         chat.runtime_index.bind(client_txn_id, client_txn_id);
@@ -5531,6 +6756,14 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn load_group_members(
+            &self,
+            _channel_id: u64,
+            _channel_type: i32,
+        ) -> Result<Vec<crate::presentation::vm::GroupMemberVm>, UiError> {
+            Ok(Vec::new())
+        }
+
         async fn load_friend_request_list(
             &self,
         ) -> Result<Vec<crate::presentation::vm::FriendRequestItemVm>, UiError> {
@@ -5583,6 +6816,8 @@ mod tests {
             _channel_type: i32,
             _client_txn_id: u64,
             _body: String,
+            _reply_to_server_message_id: Option<u64>,
+            _mentioned_user_ids: Option<Vec<u64>>,
         ) -> Result<u64, UiError> {
             Err(UiError::Unknown("unused".to_string()))
         }
@@ -5665,6 +6900,155 @@ mod tests {
         fn subscribe_timeline(&self, _session_epoch: u64) -> Subscription<SdkEvent> {
             Subscription::none()
         }
+
+        async fn load_user_profile(
+            &self,
+            _user_id: u64,
+            _channel_id: u64,
+            _fallback_name: Option<String>,
+        ) -> Result<crate::presentation::vm::AddFriendDetailVm, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn set_friend_alias(&self, _user_id: u64, _alias: String) -> Result<bool, UiError> {
+            Ok(false)
+        }
+
+        async fn pin_channel(&self, _channel_id: u64, _pinned: bool) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn mute_channel(&self, _channel_id: u64, _muted: bool) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn delete_friend(&self, _friend_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn add_to_blacklist(&self, _blocked_user_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn remove_from_blacklist(&self, _blocked_user_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn is_user_blacklisted(&self, _user_id: u64) -> Result<bool, UiError> {
+            Ok(false)
+        }
+
+        async fn fetch_group_members_detailed(
+            &self,
+            _group_id: u64,
+        ) -> Result<Vec<crate::presentation::vm::GroupMemberDetailVm>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn add_group_member(&self, _group_id: u64, _user_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn remove_group_member(&self, _group_id: u64, _user_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn leave_group(&self, _group_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn hide_channel(&self, _channel_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn delete_channel_local(&self, _channel_id: u64) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn load_quick_phrases(&self) -> Result<Vec<String>, UiError> {
+            Ok(Vec::new())
+        }
+
+        async fn save_quick_phrases(&self, _phrases: &[String]) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn start_message_media_download(
+            &self,
+            _message_id: u64,
+            _download_url: String,
+            _mime: String,
+            _filename_hint: Option<String>,
+            _created_at_ms: i64,
+        ) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn pause_message_media_download(&self, _message_id: u64) {}
+        async fn resume_message_media_download(&self, _message_id: u64) {}
+        async fn cancel_message_media_download(&self, _message_id: u64) {}
+
+        async fn get_media_download_state(
+            &self,
+            _message_id: u64,
+        ) -> privchat_sdk::MediaDownloadState {
+            privchat_sdk::MediaDownloadState::Idle
+        }
+
+        async fn download_message_media_blocking(
+            &self,
+            _message_id: u64,
+            _download_url: String,
+            _mime: String,
+            _filename_hint: Option<String>,
+            _created_at_ms: i64,
+        ) -> Result<String, UiError> {
+            Err(UiError::Unknown("unused".to_string()))
+        }
+
+        async fn add_reaction(
+            &self,
+            _server_message_id: u64,
+            _channel_id: u64,
+            _channel_type: i32,
+            _message_id: u64,
+            _my_uid: u64,
+            _emoji: String,
+        ) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn remove_reaction(
+            &self,
+            _server_message_id: u64,
+            _channel_id: u64,
+            _channel_type: i32,
+            _message_id: u64,
+            _my_uid: u64,
+            _emoji: String,
+        ) -> Result<(), UiError> {
+            Ok(())
+        }
+
+        async fn list_local_message_reactions_batch(
+            &self,
+            _message_ids: Vec<u64>,
+            _my_uid: u64,
+        ) -> Result<
+            std::collections::HashMap<u64, Vec<crate::presentation::vm::ReactionChipVm>>,
+            UiError,
+        > {
+            Ok(std::collections::HashMap::new())
+        }
+
+        async fn forward_message(
+            &self,
+            _src_message_id: u64,
+            _target_channel_id: u64,
+            _target_channel_type: i32,
+        ) -> Result<u64, UiError> {
+            Ok(0)
+        }
     }
 
     fn base_state() -> AppState {
@@ -5683,11 +7067,14 @@ mod tests {
             unread_marker: UnreadMarkerVm::default(),
             typing_hint: None,
             typing_user_id: None,
-    
+
             peer_last_read_pts: None,
             attachment_menu: None,
             user_profile_panel: None,
             last_cursor_pos: None,
+            delete_confirm: None,
+            message_reactions: std::collections::HashMap::new(),
+            reaction_picker_for: None,
         });
         state
     }
@@ -5709,12 +7096,14 @@ mod tests {
             local_thumbnail_path: None,
             thumb_status: 0,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at: 0,
             pts: None,
             send_state: Some(MessageSendStateVm::Queued),
             is_own: true,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: None,
         }
     }
 
@@ -5741,12 +7130,14 @@ mod tests {
             local_thumbnail_path: None,
             thumb_status: 0,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at,
             pts: Some(pts),
             send_state: None,
             is_own: false,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: None,
         }
     }
 
@@ -5868,12 +7259,14 @@ mod tests {
             local_thumbnail_path: None,
             thumb_status: 0,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at: 0,
             pts: Some(99),
             send_state: None,
             is_own: false,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: None,
         };
 
         let _ = update(
@@ -5918,12 +7311,14 @@ mod tests {
             local_thumbnail_path: None,
             thumb_status: 0,
             media_file_size: None,
+            voice_duration_secs: None,
             created_at: 1,
             pts: Some(22),
             send_state: None,
             is_own: false,
             is_deleted: false,
             delivered: false,
+            reply_to_server_message_id: None,
         };
 
         let _ = update(
@@ -6037,6 +7432,8 @@ mod tests {
             subtitle: "msg".to_string(),
             unread_count: 3,
             last_msg_timestamp: 0,
+            is_pinned: false,
+            is_muted: false,
         }];
         state.session_list.total_unread_count = 3;
 
@@ -6051,6 +7448,8 @@ mod tests {
                     subtitle: "msg".to_string(),
                     unread_count: 3,
                     last_msg_timestamp: 0,
+                    is_pinned: false,
+                    is_muted: false,
                 }],
             },
             &bridge,

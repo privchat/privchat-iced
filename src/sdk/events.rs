@@ -115,6 +115,7 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::MediaJobRequested { .. } => "media_job_requested",
         SdkEvent::ShutdownStarted => "shutdown_started",
         SdkEvent::ShutdownCompleted => "shutdown_completed",
+        SdkEvent::ForcedLogout { .. } => "forced_logout",
     }
 }
 
@@ -139,7 +140,11 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
                 ConnectionState::Connected | ConnectionState::LoggedIn | ConnectionState::New => {
                     ConnectionTitleState::Connecting
                 }
-                ConnectionState::Shutdown => ConnectionTitleState::Disconnected,
+                // Terminated = 认证终局：SDK 已断开并停止自动重连；标题条按断开态显示，
+                // 真正的"强制登出"由 SdkEvent::ForcedLogout 驱动 UI 跳登录页。
+                ConnectionState::Terminated | ConnectionState::Shutdown => {
+                    ConnectionTitleState::Disconnected
+                }
             };
             AppMessage::ConnectionTitleStateChanged { state }
         }
@@ -283,7 +288,9 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
                 "sdk_event: sync_entity_changed entity_type={} entity_id={} deleted={}",
                 entity, entity_id, deleted
             );
-            if is_channel_entity(&entity) || is_message_entity(&entity) {
+            if entity == "message_reaction" {
+                AppMessage::SyncMessageReactionChanged
+            } else if is_channel_entity(&entity) || is_message_entity(&entity) {
                 AppMessage::RefreshSessionList
             } else if is_contact_entity(&entity) {
                 AppMessage::RefreshAddFriendData
