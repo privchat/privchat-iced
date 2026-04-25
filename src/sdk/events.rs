@@ -116,6 +116,7 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::ShutdownStarted => "shutdown_started",
         SdkEvent::ShutdownCompleted => "shutdown_completed",
         SdkEvent::ForcedLogout { .. } => "forced_logout",
+        SdkEvent::TokenRefreshed { .. } => "token_refreshed",
     }
 }
 
