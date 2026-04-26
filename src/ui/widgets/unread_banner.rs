@@ -11,9 +11,9 @@ pub fn view(unread: &UnreadMarkerVm) -> Element<'_, AppMessage> {
     }
 
     let label = if unread.unread_count > 0 {
-        format!("{} unread messages", unread.unread_count)
+        format!("{} 条未读消息", unread.unread_count)
     } else {
-        "New messages below".to_string()
+        "下方有新消息".to_string()
     };
 
     container(
