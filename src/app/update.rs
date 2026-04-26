@@ -1919,11 +1919,20 @@ pub fn update(
                 .as_ref()
                 .map(|p| Path::new(p).exists())
                 .unwrap_or(false);
+            let thumbnail_exists = thumbnail_path
+                .as_ref()
+                .map(|p| Path::new(p).exists())
+                .unwrap_or(false);
 
+            // 显示路径必须指向存在的本地文件，否则 iced::widget::image() 加载失败时
+            // 整个 viewer 区域会变成 base container 的深色背景（看起来"黑屏"）。
+            // 留空字符串可让 viewer 走"加载中..."提示分支，体感更友好。
             let display_path = if original_exists {
                 original_path.clone().unwrap()
+            } else if thumbnail_exists {
+                thumbnail_path.clone().unwrap()
             } else {
-                thumbnail_path.clone().unwrap_or_default()
+                String::new()
             };
 
             let will_download = !original_exists && (file_id.is_some() || media_url.is_some());
@@ -1932,7 +1941,7 @@ pub fn update(
                 image_path: display_path,
                 loading_original: will_download,
                 original_path: if original_exists { original_path } else { None },
-                thumbnail_path: thumbnail_path.clone(),
+                thumbnail_path: if thumbnail_exists { thumbnail_path.clone() } else { None },
                 title: "图片查看器".to_string(),
                 download_progress: None,
             };
@@ -2569,6 +2578,22 @@ pub fn update(
             if let Some(wid) = state.image_viewer_window_id.take() {
                 state.image_viewer = None;
                 return window::close(wid);
+            }
+            Task::none()
+        }
+
+        AppMessage::OpenExternalUrl(url) => {
+            // 仅放行 http/https，避免误用 file:// 等本地协议触发命令注入。
+            let trimmed = url.trim().to_string();
+            let scheme_ok = trimmed.starts_with("http://") || trimmed.starts_with("https://");
+            if scheme_ok && !trimmed.is_empty() {
+                if let Err(error) = open_with_system(&trimmed) {
+                    warn!(
+                        "open external url failed: url={} error={}",
+                        trimmed,
+                        format_ui_error(&error)
+                    );
+                }
             }
             Task::none()
         }

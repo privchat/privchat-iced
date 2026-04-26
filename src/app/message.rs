@@ -428,6 +428,8 @@ pub enum AppMessage {
         result: Result<String, UiError>,
     },
     CloseImagePreview,
+    /// 打开外部链接（http/https），由系统默认浏览器处理。
+    OpenExternalUrl(String),
     OpenUserProfile {
         user_id: u64,
     },

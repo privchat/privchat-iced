@@ -316,42 +316,48 @@ pub fn view<'a>(
     };
 
     // Right-click context menu overlay (positioned at cursor snapshot).
-    let content: Element<'_, AppMessage> = if let Some(menu) = &chat.attachment_menu {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        let items = build_menu_items(menu, now_ms);
-        if items.is_empty() {
-            content
-        } else {
-            let pos = menu.anchor_pos.unwrap_or(iced::Point::ORIGIN);
-            let offset_x = pos.x.max(0.0);
-            let offset_y = pos.y.max(0.0);
-            stack![
-                content,
-                mouse_area(
-                    container(text(""))
-                        .width(Length::Fill)
-                        .height(Length::Fill)
-                )
-                .on_press(AppMessage::DismissAttachmentMenu)
-                .on_right_press(AppMessage::DismissAttachmentMenu),
-                column![
-                    container(text("")).height(Length::Fixed(offset_y)),
-                    row![
-                        container(text("")).width(Length::Fixed(offset_x)),
-                        context_menu_popup(items),
-                        container(text("")).width(Length::Fill),
-                    ],
-                    container(text("")).height(Length::Fill),
-                ]
-                .width(Length::Fill)
-                .height(Length::Fill),
-            ]
+    // 始终用 stack 包一层：菜单关闭时 stack 只有 base content，打开时再 push 遮罩与菜单弹层。
+    // 若按 if-Some/Else 切换 wrapper 类型，scrollable 内部 state 会随 widget tree 重置，
+    // 在 anchor_bottom() 下表现为"右键后跳到列表底部"。
+    let content: Element<'_, AppMessage> = {
+        let mut layers: Vec<Element<'_, AppMessage>> = vec![content];
+        if let Some(menu) = &chat.attachment_menu {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let items = build_menu_items(menu, now_ms);
+            if !items.is_empty() {
+                let pos = menu.anchor_pos.unwrap_or(iced::Point::ORIGIN);
+                let offset_x = pos.x.max(0.0);
+                let offset_y = pos.y.max(0.0);
+                layers.push(
+                    mouse_area(
+                        container(text(""))
+                            .width(Length::Fill)
+                            .height(Length::Fill),
+                    )
+                    .on_press(AppMessage::DismissAttachmentMenu)
+                    .on_right_press(AppMessage::DismissAttachmentMenu)
+                    .into(),
+                );
+                layers.push(
+                    column![
+                        container(text("")).height(Length::Fixed(offset_y)),
+                        row![
+                            container(text("")).width(Length::Fixed(offset_x)),
+                            context_menu_popup(items),
+                            container(text("")).width(Length::Fill),
+                        ],
+                        container(text("")).height(Length::Fill),
+                    ]
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .into(),
+                );
+            }
+        }
+        iced::widget::stack(layers)
             .width(Length::Fill)
             .height(Length::Fill)
             .into()
-        }
-    } else {
-        content
     };
 
     // Delete-message confirmation dialog overlay
