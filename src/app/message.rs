@@ -462,6 +462,16 @@ pub enum AppMessage {
     ImageDecodeFailed {
         message_id: u64,
     },
+    /// 大图查看器专用的解码完成事件（高分辨率，与主列表小尺寸 cache 区分开）。
+    ImageViewerImageDecoded {
+        message_id: u64,
+        source_path: String,
+        handle: iced_image::Handle,
+    },
+    ImageViewerImageDecodeFailed {
+        message_id: u64,
+        source_path: String,
+    },
     AddFriendInputChanged {
         text: String,
     },

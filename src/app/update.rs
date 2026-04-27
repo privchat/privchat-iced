@@ -1936,16 +1936,40 @@ pub fn update(
             };
 
             let will_download = !original_exists && (file_id.is_some() || media_url.is_some());
+
+            tracing::info!(
+                "OpenImagePreview message_id={} original_path={:?} (exists={}) thumbnail_path={:?} (exists={}) media_url={:?} file_id={:?} → display_path={:?} will_download={}",
+                message_id,
+                original_path,
+                original_exists,
+                thumbnail_path,
+                thumbnail_exists,
+                media_url,
+                file_id,
+                display_path,
+                will_download,
+            );
+
+            // 复用主列表已经预解码的 Handle 作为兜底，避免 from_path 失败时整片黑屏。
+            let cached_handle = state.image_cache.get(&message_id).cloned();
             let viewer_state = crate::app::state::ImageViewerState {
                 message_id,
-                image_path: display_path,
+                image_path: display_path.clone(),
                 loading_original: will_download,
                 original_path: if original_exists { original_path } else { None },
                 thumbnail_path: if thumbnail_exists { thumbnail_path.clone() } else { None },
                 title: "图片查看器".to_string(),
                 download_progress: None,
+                image_handle: cached_handle,
+                image_handle_source: None,
             };
             state.image_viewer = Some(viewer_state);
+
+            let viewer_decode_task: Option<Task<AppMessage>> = if !display_path.is_empty() {
+                Some(spawn_image_viewer_decode(message_id, display_path))
+            } else {
+                None
+            };
 
             let (window_id, open_task) = window::open(image_viewer_window_settings());
             state.image_viewer_window_id = Some(window_id);
@@ -1992,13 +2016,50 @@ pub fn update(
                     },
                 );
 
-                Task::batch([open_task, download_task])
+                let mut tasks = vec![open_task, download_task];
+                if let Some(decode) = viewer_decode_task {
+                    tasks.push(decode);
+                }
+                Task::batch(tasks)
+            } else if let Some(decode) = viewer_decode_task {
+                Task::batch([open_task, decode])
             } else {
                 open_task
             }
         }
 
         AppMessage::ImageViewerWindowOpened { window_id: _ } => {
+            Task::none()
+        }
+
+        AppMessage::ImageViewerImageDecoded {
+            message_id,
+            source_path,
+            handle,
+        } => {
+            if let Some(viewer) = &mut state.image_viewer {
+                if viewer.message_id == message_id {
+                    tracing::info!(
+                        "image viewer decoded message_id={} source_path={:?}",
+                        message_id,
+                        source_path,
+                    );
+                    viewer.image_handle = Some(handle);
+                    viewer.image_handle_source = Some(source_path);
+                }
+            }
+            Task::none()
+        }
+
+        AppMessage::ImageViewerImageDecodeFailed {
+            message_id,
+            source_path,
+        } => {
+            tracing::warn!(
+                "image viewer decode failed message_id={} source_path={:?}",
+                message_id,
+                source_path,
+            );
             Task::none()
         }
 
@@ -2042,6 +2103,7 @@ pub fn update(
         AppMessage::MediaDownloadStateChanged { message_id, state: dl_state } => {
             use privchat_sdk::MediaDownloadState as Dl;
             // Update image viewer if this is the active preview.
+            let mut viewer_decode_task: Option<Task<AppMessage>> = None;
             if let Some(viewer) = &mut state.image_viewer {
                 if viewer.message_id == message_id {
                     match &dl_state {
@@ -2054,10 +2116,18 @@ pub fn update(
                             viewer.download_progress = Some((*bytes, *total));
                         }
                         Dl::Done { path } => {
+                            tracing::info!(
+                                "image viewer download done message_id={} path={:?} exists={}",
+                                message_id,
+                                path,
+                                Path::new(path).exists(),
+                            );
                             viewer.image_path = path.clone();
                             viewer.original_path = Some(path.clone());
                             viewer.loading_original = false;
                             viewer.download_progress = None;
+                            viewer_decode_task =
+                                Some(spawn_image_viewer_decode(message_id, path.clone()));
                         }
                         Dl::Failed { code, message } => {
                             tracing::warn!(
@@ -2074,7 +2144,7 @@ pub fn update(
                     }
                 }
             }
-            Task::none()
+            viewer_decode_task.unwrap_or_else(Task::none)
         }
 
         AppMessage::OpenAttachment {
@@ -6359,6 +6429,45 @@ async fn decode_image_to_rgba(path: String) -> Option<iced::widget::image::Handl
     })
     .await
     .ok()?
+}
+
+/// Decode an image at near-original size (capped) for the image viewer window.
+/// 大图查看器需要更高分辨率，但仍要避免无脑加载几十兆的原图导致卡顿。
+async fn decode_image_for_viewer(path: String) -> Option<iced::widget::image::Handle> {
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&path).ok()?;
+        let img = ::image::load_from_memory(&bytes).ok()?;
+        let (w, h) = (img.width(), img.height());
+        const MAX_DIM: u32 = 2048;
+        let img = if w > MAX_DIM || h > MAX_DIM {
+            img.resize(MAX_DIM, MAX_DIM, ::image::imageops::FilterType::Triangle)
+        } else {
+            img
+        };
+        let rgba = img.to_rgba8();
+        let (w, h) = rgba.dimensions();
+        Some(iced::widget::image::Handle::from_rgba(w, h, rgba.into_raw()))
+    })
+    .await
+    .ok()?
+}
+
+fn spawn_image_viewer_decode(message_id: u64, source_path: String) -> Task<AppMessage> {
+    let path_for_task = source_path.clone();
+    Task::perform(
+        async move { decode_image_for_viewer(path_for_task).await },
+        move |result| match result {
+            Some(handle) => AppMessage::ImageViewerImageDecoded {
+                message_id,
+                source_path: source_path.clone(),
+                handle,
+            },
+            None => AppMessage::ImageViewerImageDecodeFailed {
+                message_id,
+                source_path: source_path.clone(),
+            },
+        },
+    )
 }
 
 fn schedule_thumbnail_download_for_message(

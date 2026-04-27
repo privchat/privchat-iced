@@ -72,20 +72,28 @@ pub fn view(viewer: &ImageViewerState) -> Element<'_, AppMessage> {
         })
     };
 
-    let image_area: Element<'_, AppMessage> = if !viewer.image_path.is_empty() {
-        let base = container(
+    let image_area: Element<'_, AppMessage> = if viewer.image_handle.is_some()
+        || !viewer.image_path.is_empty()
+    {
+        let image_widget = if let Some(handle) = viewer.image_handle.clone() {
+            image(handle)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .content_fit(iced::ContentFit::Contain)
+        } else {
             image(viewer.image_path.clone())
                 .width(Length::Fill)
                 .height(Length::Fill)
-                .content_fit(iced::ContentFit::Contain),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .padding(12)
-        .style(|_| container::Style {
-            background: Some(Background::Color(C_BG)),
-            ..container::Style::default()
-        });
+                .content_fit(iced::ContentFit::Contain)
+        };
+        let base = container(image_widget)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .padding(12)
+            .style(|_| container::Style {
+                background: Some(Background::Color(C_BG)),
+                ..container::Style::default()
+            });
 
         if viewer.loading_original {
             let progress_label = match viewer.download_progress {
