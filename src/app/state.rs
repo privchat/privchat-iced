@@ -530,6 +530,15 @@ pub struct ImageViewerState {
     /// Current download progress as (bytes, total). Populated while the SDK
     /// download is in flight; cleared once the original is ready.
     pub download_progress: Option<(u64, Option<u64>)>,
+    /// Pre-decoded RGBA handle used for rendering. Populated synchronously
+    /// from `AppState::image_cache` (thumbnail) when the viewer opens, then
+    /// upgraded to a full-resolution handle once the viewer's own decode
+    /// finishes. iced 渲染 `Handle::from_path` 在多窗口下偶发黑屏，所以这里
+    /// 显式持有一份解码好的 Handle 兜底。
+    pub image_handle: Option<iced_image::Handle>,
+    /// The path that produced `image_handle`. Used to detect when the source
+    /// has changed (e.g. thumbnail → original) so we can re-trigger decoding.
+    pub image_handle_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
