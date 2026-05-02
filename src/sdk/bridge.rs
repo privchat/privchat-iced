@@ -1694,7 +1694,7 @@ impl SdkBridge for PrivchatSdkBridge {
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         let content = if has_reply || has_mentions {
-            let envelope = privchat_protocol::message::MessagePayloadEnvelope {
+            let envelope = privchat_protocol::message::LocalMessagePayloadEnvelope {
                 content: body,
                 metadata: None,
                 reply_to_message_id: reply_to_server_message_id.map(|id| id.to_string()),
