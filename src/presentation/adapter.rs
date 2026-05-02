@@ -1,6 +1,5 @@
-use privchat_protocol::message::{
-    ContentMessageType, FileMetadata, ImageMetadata, MessagePayloadEnvelope,
-};
+use privchat_protocol::message::{ContentMessageType, LocalLocalMessagePayloadEnvelope};
+use privchat_protocol::{FileMetadata, ImageMetadata};
 use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 use std::path::{Path, PathBuf};
 
@@ -51,8 +50,8 @@ fn coerce_media_metadata(value: &serde_json::Value) -> Option<serde_json::Value>
     None
 }
 
-fn parse_payload_envelope(content: &str) -> Option<MessagePayloadEnvelope> {
-    let parsed = serde_json::from_str::<MessagePayloadEnvelope>(content).ok()?;
+fn parse_payload_envelope(content: &str) -> Option<LocalMessagePayloadEnvelope> {
+    let parsed = serde_json::from_str::<LocalMessagePayloadEnvelope>(content).ok()?;
     let looks_like_envelope = parsed.metadata.is_some()
         || parsed.reply_to_message_id.is_some()
         || parsed.mentioned_user_ids.is_some()
@@ -68,7 +67,7 @@ fn parse_payload_envelope(content: &str) -> Option<MessagePayloadEnvelope> {
 fn extract_media_metadata(
     content_json: Option<&serde_json::Value>,
     extra_json: Option<&serde_json::Value>,
-    envelope: Option<&MessagePayloadEnvelope>,
+    envelope: Option<&LocalMessagePayloadEnvelope>,
 ) -> Option<serde_json::Value> {
     if let Some(metadata) = envelope.and_then(|v| v.metadata.as_ref()) {
         if let Some(resolved) = coerce_media_metadata(metadata) {
