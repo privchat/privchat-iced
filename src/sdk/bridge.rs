@@ -38,6 +38,7 @@ use tokio::sync::broadcast::error::RecvError;
 use crate::app::reporting::{self, MarkReadPtsSource};
 use crate::config::AppConfig;
 use crate::presentation::adapter;
+use crate::sdk::platform_http::{self, PlatformCredentials};
 use crate::presentation::vm::{
     AddFriendDetailFieldVm, AddFriendDetailVm, AddFriendSelectionVm, ClientTxnId, FriendListItemVm,
     FriendRequestItemVm, GroupListItemVm, GroupMemberDetailVm, GroupMemberVm, HistoryPageVm,
@@ -247,6 +248,33 @@ pub trait SdkBridge: Send + Sync + 'static {
         register: bool,
     ) -> Result<LoginSessionVm, UiError>;
 
+    /// 当前账号体系归属（spec/02-server/AUTH_SPEC.md §1.1）。UI 层据此渲染对应登录表单。
+    fn account_mode(&self) -> crate::config::AccountMode;
+
+    /// PLATFORM 模式：通过 privchat-application `/auth/send-sms-code` 发送匿名场景验证码（scene=1 登录）。
+    /// BUILTIN 模式调用此方法返回 `UiError::Unknown`。
+    async fn send_sms_code(&self, mobile: String) -> Result<(), UiError>;
+
+    /// PLATFORM 模式：手机号 + 短信码登录。内部调 application `/auth/sms-login` 拿到 unified
+    /// access_token，然后 `sdk.connect` + `sdk.authenticate` + post-auth sync。BUILTIN 模式
+    /// 调用此方法返回 `UiError::Unknown`。
+    async fn login_with_sms(
+        &self,
+        mobile: String,
+        sms_code: String,
+        device_id: String,
+    ) -> Result<LoginSessionVm, UiError>;
+
+    /// 触发 mode-aware refresh：BUILTIN 走 SDK FFI `account/auth/refresh` RPC；PLATFORM 走
+    /// privchat-application HTTP `/auth/refresh-token`。返回新的 LoginSessionVm；调用方负责
+    /// 持久化新 refresh_token（PLATFORM 模式）。
+    async fn refresh_session(
+        &self,
+        user_id: u64,
+        refresh_token: String,
+        device_id: String,
+    ) -> Result<LoginSessionVm, UiError>;
+
     async fn open_timeline(
         &self,
         channel_id: u64,
@@ -431,6 +459,9 @@ pub trait SdkBridge: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct PrivchatSdkBridge {
     sdk: PrivchatSdk,
+    /// 账号体系归属（spec/02-server/AUTH_SPEC.md §1.1）。BUILTIN 走 SDK login/refresh；
+    /// PLATFORM 走 privchat-application HTTP 端点。
+    account: crate::config::AccountConfig,
 }
 
 #[derive(Clone)]
@@ -511,12 +542,27 @@ impl PrivchatSdkBridge {
 
         Self {
             sdk: PrivchatSdk::new(sdk_config),
+            account: config.account,
         }
     }
 
     async fn current_uid(&self) -> Result<Option<u64>, UiError> {
         let snapshot = self.sdk.session_snapshot().await.map_err(map_sdk_error)?;
         Ok(snapshot.map(|s| s.user_id))
+    }
+
+    fn platform_base_url(&self) -> Result<String, UiError> {
+        self.account
+            .platform_base_url
+            .as_ref()
+            .map(|s| s.trim().trim_end_matches('/').to_string())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                UiError::Unknown(
+                    "PLATFORM mode requires non-empty account.platform_base_url in profile"
+                        .to_string(),
+                )
+            })
     }
 
     /// 快捷消息文件路径: {data_dir}/users/{uid}/quick_phrases.json
@@ -835,6 +881,7 @@ impl SdkBridge for PrivchatSdkBridge {
             user_id: snapshot.user_id,
             token: snapshot.token,
             device_id: snapshot.device_id,
+            refresh_token: None,
         }))
     }
 
@@ -1067,6 +1114,7 @@ impl SdkBridge for PrivchatSdkBridge {
             user_id: snapshot.user_id,
             token: snapshot.token,
             device_id: snapshot.device_id,
+            refresh_token: None,
         })
     }
 
@@ -1605,6 +1653,109 @@ impl SdkBridge for PrivchatSdkBridge {
             user_id: result.user_id,
             token: result.token,
             device_id: result.device_id,
+            refresh_token: result.refresh_token,
+        })
+    }
+
+    fn account_mode(&self) -> crate::config::AccountMode {
+        self.account.mode
+    }
+
+    async fn send_sms_code(&self, mobile: String) -> Result<(), UiError> {
+        if !matches!(self.account.mode, crate::config::AccountMode::Platform) {
+            return Err(UiError::Unknown(
+                "send_sms_code only available in PLATFORM mode".to_string(),
+            ));
+        }
+        let base = self.platform_base_url()?;
+        platform_http::send_sms_code(&base, mobile).await
+    }
+
+    async fn login_with_sms(
+        &self,
+        mobile: String,
+        sms_code: String,
+        device_id: String,
+    ) -> Result<LoginSessionVm, UiError> {
+        if !matches!(self.account.mode, crate::config::AccountMode::Platform) {
+            return Err(UiError::Unknown(
+                "login_with_sms only available in PLATFORM mode".to_string(),
+            ));
+        }
+        let base = self.platform_base_url()?;
+        let creds = platform_http::sms_login(&base, mobile, sms_code, device_id).await?;
+
+        self.sdk.connect().await.map_err(map_sdk_error)?;
+        self.sdk
+            .authenticate(
+                creds.user_id,
+                creds.access_token.clone(),
+                creds.device_id.clone(),
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        tracing::info!(
+            "login_with_sms: authenticate ok user_id={}",
+            creds.user_id
+        );
+        self.run_post_auth_sync("login_with_sms").await?;
+
+        Ok(LoginSessionVm {
+            user_id: creds.user_id,
+            token: creds.access_token,
+            device_id: creds.device_id,
+            refresh_token: Some(creds.refresh_token),
+        })
+    }
+
+    async fn refresh_session(
+        &self,
+        user_id: u64,
+        refresh_token: String,
+        device_id: String,
+    ) -> Result<LoginSessionVm, UiError> {
+        let creds = match self.account.mode {
+            crate::config::AccountMode::Platform => {
+                let base = self.platform_base_url()?;
+                platform_http::refresh_token(&base, refresh_token, device_id.clone()).await?
+            }
+            crate::config::AccountMode::Builtin => {
+                // BUILTIN：走 server `account/auth/refresh` RPC（spec TOKEN_REFRESH_SPEC §5）。
+                // refresh_token 字段缺失/None 时保留旧值（spec §B1 rotation 规则）。
+                let req = privchat_protocol::rpc::auth::AuthRefreshRequest {
+                    refresh_token: refresh_token.clone(),
+                    device_id: device_id.clone(),
+                };
+                let resp: privchat_protocol::rpc::auth::AuthRefreshResponse = self
+                    .sdk
+                    .rpc_call_typed(routes::auth::REFRESH, &req)
+                    .await
+                    .map_err(map_sdk_error)?;
+                PlatformCredentials {
+                    user_id,
+                    access_token: resp.access_token,
+                    refresh_token: resp.refresh_token.unwrap_or(refresh_token),
+                    device_id,
+                }
+            }
+        };
+
+        // 用新 access_token 重新认证；transport 已由 SDK 维持，无需再 connect。
+        self.sdk
+            .authenticate(
+                creds.user_id,
+                creds.access_token.clone(),
+                creds.device_id.clone(),
+            )
+            .await
+            .map_err(map_sdk_error)?;
+        tracing::info!("refresh_session: authenticate ok user_id={}", creds.user_id);
+
+        Ok(LoginSessionVm {
+            user_id: creds.user_id,
+            token: creds.access_token,
+            device_id: creds.device_id,
+            refresh_token: Some(creds.refresh_token),
         })
     }
 

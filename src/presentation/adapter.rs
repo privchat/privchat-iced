@@ -1,4 +1,4 @@
-use privchat_protocol::message::{ContentMessageType, LocalLocalMessagePayloadEnvelope};
+use privchat_protocol::message::{ContentMessageType, LocalMessagePayloadEnvelope};
 use privchat_protocol::{FileMetadata, ImageMetadata};
 use privchat_sdk::{StoredChannel, StoredChannelExtra, StoredMessage, TimelineSnapshot};
 use std::path::{Path, PathBuf};

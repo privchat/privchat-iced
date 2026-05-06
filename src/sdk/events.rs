@@ -117,6 +117,7 @@ fn sdk_event_type(event: &SdkEvent) -> &'static str {
         SdkEvent::ShutdownCompleted => "shutdown_completed",
         SdkEvent::ForcedLogout { .. } => "forced_logout",
         SdkEvent::TokenRefreshed { .. } => "token_refreshed",
+        SdkEvent::AccessTokenRefreshNeeded { .. } => "access_token_refresh_needed",
     }
 }
 
@@ -412,6 +413,13 @@ pub fn map_sdk_event(event: SdkEvent, _context: Option<&EventMapContext>) -> App
         }
         SdkEvent::MediaDownloadStateChanged { message_id, state } => {
             AppMessage::MediaDownloadStateChanged { message_id, state }
+        }
+        SdkEvent::AccessTokenRefreshNeeded { code, message } => {
+            info!(
+                "sdk_event: access_token_refresh_needed code={} message={}",
+                code, message
+            );
+            AppMessage::AccessTokenRefreshNeeded { code, message }
         }
         _ => AppMessage::Noop,
     }

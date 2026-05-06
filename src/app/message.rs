@@ -212,6 +212,35 @@ pub enum AppMessage {
     LoginFailed {
         error: UiError,
     },
+    // ─── PLATFORM 模式登录（账号体系归属 = privchat-application 平台账号）─────────
+    LoginMobileChanged {
+        text: String,
+    },
+    LoginSmsCodeChanged {
+        text: String,
+    },
+    LoginCountryDialCodeSelected {
+        dial_code: String,
+    },
+    LoginCountrySheetToggled {
+        open: bool,
+    },
+    LoginSendSmsPressed,
+    LoginSmsCodeSent,
+    LoginSmsCodeSendFailed {
+        error: UiError,
+    },
+    LoginSmsCooldownTick,
+    LoginSmsLoginPressed,
+    /// SDK emit `AccessTokenRefreshNeeded`（典型 10002）后业务层走 mode-aware refresh。
+    AccessTokenRefreshNeeded {
+        code: u32,
+        message: String,
+    },
+    AccessTokenRefreshSucceeded,
+    AccessTokenRefreshFailed {
+        error: UiError,
+    },
     ConversationSelected {
         channel_id: u64,
         channel_type: i32,

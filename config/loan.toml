@@ -1,6 +1,12 @@
 [application]
 name = "PrivChat云端金融"
 
+[account]
+mode = "PLATFORM"
+# privchat-application 路由组根 URL（含 /app 前缀，无尾斜杠）。
+# 实际部署地址请按线上环境替换。
+platform_base_url = "http://8.210.184.78:8080/app"
+
 [network]
 connect_timeout_ms = 5000
 request_timeout_ms = 10000
