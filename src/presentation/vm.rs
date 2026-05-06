@@ -21,6 +21,9 @@ pub struct LoginSessionVm {
     pub user_id: u64,
     pub token: String,
     pub device_id: String,
+    /// PLATFORM 模式由 host 持有 refresh token；BUILTIN 模式 SDK 内部已持久化，
+    /// 这里保持 None。Refresh 成功后 host 持久化新值。
+    pub refresh_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]

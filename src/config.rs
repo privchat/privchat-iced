@@ -6,11 +6,35 @@ pub struct AppConfig {
     pub application: ApplicationConfig,
     pub network: NetworkConfig,
     pub servers: Vec<ServerConfig>,
+    /// 账号体系归属（与 privchat-server `[account] mode` 对齐）；缺省视为 BUILTIN，
+    /// 与 privchat-iced 历史行为兼容。详见 spec/02-server/AUTH_SPEC.md §1.1。
+    #[serde(default)]
+    pub account: AccountConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ApplicationConfig {
     pub name: String,
+}
+
+/// 账号体系归属。BUILTIN = privchat-server 内置账号；PLATFORM = privchat-application
+/// 平台账号（手机号 + 短信码）。
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "UPPERCASE")]
+pub enum AccountMode {
+    #[default]
+    Builtin,
+    Platform,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AccountConfig {
+    #[serde(default)]
+    pub mode: AccountMode,
+    /// PLATFORM 模式必填：privchat-application 路由组根 URL（含 `/app` 前缀，无尾斜杠）。
+    /// e.g. `http://192.168.1.7:8080/app`。BUILTIN 模式忽略本字段。
+    #[serde(default)]
+    pub platform_base_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,6 +109,20 @@ fn validate_config(profile: &str, config: &AppConfig) -> anyhow::Result<()> {
             other => {
                 anyhow::bail!("profile={profile}: unsupported protocol={other}");
             }
+        }
+    }
+
+    if matches!(config.account.mode, AccountMode::Platform) {
+        let url = config
+            .account
+            .platform_base_url
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty());
+        if url.is_none() {
+            anyhow::bail!(
+                "profile={profile}: account.mode=PLATFORM requires non-empty account.platform_base_url"
+            );
         }
     }
 

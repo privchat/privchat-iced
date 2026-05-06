@@ -89,6 +89,7 @@ fn view(app: &PrivchatApp, window_id: window::Id) -> Element<'_, AppMessage> {
         Route::Login => ui::screens::login::view(
             &app.state.auth,
             app.state.switch_account.add_account_login_mode,
+            app.bridge.account_mode(),
         ),
         Route::SwitchAccount => ui::screens::switch_account::view(&app.state.switch_account),
         Route::Chat | Route::AddFriend | Route::Settings | Route::SessionList => {

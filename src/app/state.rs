@@ -34,6 +34,19 @@ pub struct AuthState {
     pub error: Option<String>,
     pub user_id: Option<u64>,
     pub token: Option<String>,
+    // ─── PLATFORM 模式字段（手机号 + 短信码登录）─────────────────────────
+    /// 选中的国家拨号区号，含 `+` 前缀（默认 `+86`）。
+    pub country_dial_code: String,
+    /// 用户输入的本地手机号（不含国家码）。
+    pub mobile: String,
+    /// 用户输入的短信验证码。
+    pub sms_code: String,
+    /// 当前是否正在发送短信（请求未返回）。
+    pub is_sending_sms: bool,
+    /// 短信发送倒计时（秒，0 表示可重新发送）。
+    pub sms_cooldown_secs: u32,
+    /// 国家选择面板是否展开。
+    pub country_sheet_open: bool,
 }
 
 impl Default for AuthState {
@@ -46,6 +59,12 @@ impl Default for AuthState {
             error: None,
             user_id: None,
             token: None,
+            country_dial_code: "+86".to_string(),
+            mobile: String::new(),
+            sms_code: String::new(),
+            is_sending_sms: false,
+            sms_cooldown_secs: 0,
+            country_sheet_open: false,
         }
     }
 }

@@ -41,6 +41,10 @@ const FILE_MESSAGE_TYPE: i32 = ContentMessageType::File as i32;
 const VIDEO_MESSAGE_TYPE: i32 = ContentMessageType::Video as i32;
 const MAX_RUNTIME_LOGS: usize = 1200;
 const TYPING_HINT_TTL_MILLIS: u64 = 4_000;
+/// PLATFORM 模式：发送短信冷却时间，与 privchat-app `LoginPagePlatform` 对齐。
+const SMS_RESEND_COOLDOWN_SECS: u32 = 60;
+const SMS_CODE_MIN_LEN: usize = 4;
+const SMS_CODE_MAX_LEN: usize = 8;
 
 /// Sole mutation entry point.
 pub fn update(
@@ -318,6 +322,89 @@ pub fn update(
 
         AppMessage::LoginDeviceIdChanged { text } => {
             state.auth.device_id = text;
+            Task::none()
+        }
+
+        // ─── PLATFORM 模式登录（spec/02-server/AUTH_SPEC.md §1.1）────────────
+        AppMessage::LoginMobileChanged { text } => {
+            state.auth.mobile = text.chars().filter(|c| c.is_ascii_digit()).collect();
+            state.auth.error = None;
+            Task::none()
+        }
+
+        AppMessage::LoginSmsCodeChanged { text } => {
+            state.auth.sms_code = text
+                .chars()
+                .filter(|c| c.is_ascii_digit())
+                .take(8)
+                .collect();
+            state.auth.error = None;
+            Task::none()
+        }
+
+        AppMessage::LoginCountryDialCodeSelected { dial_code } => {
+            state.auth.country_dial_code = dial_code;
+            state.auth.country_sheet_open = false;
+            Task::none()
+        }
+
+        AppMessage::LoginCountrySheetToggled { open } => {
+            state.auth.country_sheet_open = open;
+            Task::none()
+        }
+
+        AppMessage::LoginSendSmsPressed => handle_send_sms_pressed(state, bridge),
+
+        AppMessage::LoginSmsCodeSent => {
+            state.auth.is_sending_sms = false;
+            state.auth.sms_cooldown_secs = SMS_RESEND_COOLDOWN_SECS;
+            state.auth.error = None;
+            Task::perform(
+                async {
+                    sleep(Duration::from_secs(1)).await;
+                },
+                |_| AppMessage::LoginSmsCooldownTick,
+            )
+        }
+
+        AppMessage::LoginSmsCodeSendFailed { error } => {
+            state.auth.is_sending_sms = false;
+            state.auth.error = Some(format!("发送验证码失败：{}", format_ui_error(&error)));
+            Task::none()
+        }
+
+        AppMessage::LoginSmsCooldownTick => {
+            if state.auth.sms_cooldown_secs > 0 {
+                state.auth.sms_cooldown_secs -= 1;
+            }
+            if state.auth.sms_cooldown_secs > 0 {
+                Task::perform(
+                    async {
+                        sleep(Duration::from_secs(1)).await;
+                    },
+                    |_| AppMessage::LoginSmsCooldownTick,
+                )
+            } else {
+                Task::none()
+            }
+        }
+
+        AppMessage::LoginSmsLoginPressed => handle_sms_login_pressed(state, bridge),
+
+        AppMessage::AccessTokenRefreshNeeded { code, message } => {
+            handle_access_token_refresh_needed(state, bridge, code, message)
+        }
+
+        AppMessage::AccessTokenRefreshSucceeded => {
+            tracing::info!("access_token_refresh_succeeded");
+            Task::none()
+        }
+
+        AppMessage::AccessTokenRefreshFailed { error } => {
+            tracing::warn!(
+                "access_token_refresh_failed: {}",
+                format_ui_error(&error)
+            );
             Task::none()
         }
 
@@ -4881,8 +4968,15 @@ fn apply_logout(state: &mut AppState) {
     state.auth.is_submitting = false;
     state.auth.error = None;
     state.auth.password.clear();
-    state.auth.user_id = None;
+    if let Some(uid) = state.auth.user_id.take() {
+        // 主动登出 → 清掉本地 refresh token，避免下次冷启动用过期 token 撞 10002。
+        auth_prefs::clear_refresh_token(uid);
+    }
     state.auth.token = None;
+    state.auth.mobile.clear();
+    state.auth.sms_code.clear();
+    state.auth.is_sending_sms = false;
+    state.auth.sms_cooldown_secs = 0;
     state.route = Route::Login;
 }
 
@@ -5069,6 +5163,155 @@ fn sync_add_friend_flags(state: &mut AppState) {
     }
 }
 
+/// 把区号 + 本地段拼成 E.164（去掉手机号开头的 0/+，仅保留数字）。
+fn build_e164(dial_code: &str, mobile: &str) -> String {
+    let cleaned: String = mobile
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .trim_start_matches('0')
+        .to_string();
+    format!("{}{}", dial_code, cleaned)
+}
+
+/// E.164 校验：长度 [8,16]，首字符 `+`，第二字符不能是 `0`，其余必须数字。
+fn is_valid_e164(input: &str) -> bool {
+    if input.len() < 8 || input.len() > 16 {
+        return false;
+    }
+    let mut chars = input.chars();
+    if chars.next() != Some('+') {
+        return false;
+    }
+    if chars.clone().next().map(|c| c == '0').unwrap_or(true) {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_digit())
+}
+
+fn handle_send_sms_pressed(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    if state.auth.is_sending_sms || state.auth.sms_cooldown_secs > 0 {
+        return Task::none();
+    }
+    let mobile = build_e164(&state.auth.country_dial_code, &state.auth.mobile);
+    if !is_valid_e164(&mobile) {
+        state.auth.error = Some("请输入合法的手机号".to_string());
+        return Task::none();
+    }
+    state.auth.is_sending_sms = true;
+    state.auth.error = None;
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.send_sms_code(mobile).await },
+        |result| match result {
+            Ok(()) => AppMessage::LoginSmsCodeSent,
+            Err(error) => AppMessage::LoginSmsCodeSendFailed { error },
+        },
+    )
+}
+
+fn handle_sms_login_pressed(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+) -> Task<AppMessage> {
+    if state.auth.is_submitting {
+        return Task::none();
+    }
+    let mobile = build_e164(&state.auth.country_dial_code, &state.auth.mobile);
+    if !is_valid_e164(&mobile) {
+        state.auth.error = Some("请输入合法的手机号".to_string());
+        return Task::none();
+    }
+    let sms_code = state.auth.sms_code.trim().to_string();
+    if sms_code.len() < SMS_CODE_MIN_LEN || sms_code.len() > SMS_CODE_MAX_LEN {
+        state.auth.error = Some(format!(
+            "请输入 {SMS_CODE_MIN_LEN}-{SMS_CODE_MAX_LEN} 位短信验证码"
+        ));
+        return Task::none();
+    }
+    let device_id = state.auth.device_id.trim().to_string();
+    if Uuid::parse_str(&device_id).is_err() {
+        state.auth.error = Some("device_id must be a standard UUID".to_string());
+        return Task::none();
+    }
+
+    state.auth.is_submitting = true;
+    state.auth.error = None;
+
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move { bridge.login_with_sms(mobile, sms_code, device_id).await },
+        |result| match result {
+            Ok(session) => {
+                if let Some(rt) = session.refresh_token.as_ref() {
+                    auth_prefs::save_refresh_token(session.user_id, rt);
+                }
+                AppMessage::LoginSucceeded {
+                    user_id: session.user_id,
+                    token: session.token,
+                    device_id: session.device_id,
+                }
+            }
+            Err(error) => AppMessage::LoginFailed { error },
+        },
+    )
+}
+
+fn handle_access_token_refresh_needed(
+    state: &mut AppState,
+    bridge: &Arc<dyn SdkBridge>,
+    code: u32,
+    message: String,
+) -> Task<AppMessage> {
+    let Some(user_id) = state.auth.user_id else {
+        tracing::info!(
+            "access_token_refresh_needed skipped: no active user (code={} message={})",
+            code,
+            message,
+        );
+        return Task::none();
+    };
+    let device_id = state.auth.device_id.trim().to_string();
+    if device_id.is_empty() {
+        tracing::warn!("access_token_refresh_needed skipped: empty device_id");
+        return Task::none();
+    }
+    let Some(refresh_token) = auth_prefs::load_refresh_token(user_id) else {
+        tracing::warn!(
+            "access_token_refresh_needed: no local refresh_token for uid={}; user must re-login",
+            user_id
+        );
+        return Task::none();
+    };
+
+    tracing::info!(
+        "access_token_refresh_needed: refreshing user_id={} code={} message={}",
+        user_id,
+        code,
+        message,
+    );
+    let bridge = Arc::clone(bridge);
+    Task::perform(
+        async move {
+            bridge
+                .refresh_session(user_id, refresh_token, device_id)
+                .await
+        },
+        move |result| match result {
+            Ok(session) => {
+                if let Some(rt) = session.refresh_token.as_ref() {
+                    auth_prefs::save_refresh_token(session.user_id, rt);
+                }
+                AppMessage::AccessTokenRefreshSucceeded
+            }
+            Err(error) => AppMessage::AccessTokenRefreshFailed { error },
+        },
+    )
+}
+
 fn handle_login_submit(
     state: &mut AppState,
     bridge: &Arc<dyn SdkBridge>,
@@ -5102,11 +5345,19 @@ fn handle_login_submit(
                 .await
         },
         |result| match result {
-            Ok(session) => AppMessage::LoginSucceeded {
-                user_id: session.user_id,
-                token: session.token,
-                device_id: session.device_id,
-            },
+            Ok(session) => {
+                // 同时持久化 refresh_token 到 auth_prefs，用于 token 过期后自驱 refresh。
+                // BUILTIN 模式 SDK 内部也会存一份；这里冗余但能让 host 在不依赖 SDK 内部
+                // storage 的前提下走 mode-aware refresh，与 PLATFORM 路径对称。
+                if let Some(rt) = session.refresh_token.as_ref() {
+                    auth_prefs::save_refresh_token(session.user_id, rt);
+                }
+                AppMessage::LoginSucceeded {
+                    user_id: session.user_id,
+                    token: session.token,
+                    device_id: session.device_id,
+                }
+            }
             Err(error) => AppMessage::LoginFailed { error },
         },
     )
