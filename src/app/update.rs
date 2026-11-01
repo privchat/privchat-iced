@@ -785,7 +785,7 @@ pub fn update(
             state.auth.is_submitting = false;
             state.auth.error = None;
             state.auth.password.clear();
-            if Uuid::parse_str(state.auth.device_id.trim()).is_err() {
+            if !auth_prefs::is_canonical_device_id(state.auth.device_id.trim()) {
                 state.auth.device_id = Uuid::new_v4().to_string();
             }
             state.route = Route::Login;
@@ -4928,6 +4928,10 @@ fn apply_login_success(state: &mut AppState, user_id: u64, token: String, device
     state.auth.error = None;
     state.auth.user_id = Some(user_id);
     state.auth.token = Some(token);
+    // Unit tests must not write to the user's prefs file.
+    if !cfg!(test) {
+        auth_prefs::save_device_id(&device_id);
+    }
     state.auth.device_id = device_id;
     state.auth.password.clear();
     state.overlay.settings_menu_open = false;
@@ -5233,8 +5237,8 @@ fn handle_sms_login_pressed(
         return Task::none();
     }
     let device_id = state.auth.device_id.trim().to_string();
-    if Uuid::parse_str(&device_id).is_err() {
-        state.auth.error = Some("device_id must be a standard UUID".to_string());
+    if !auth_prefs::is_canonical_device_id(&device_id) {
+        state.auth.error = Some("device_id must be a lowercase hyphenated UUID v4".to_string());
         return Task::none();
     }
 
@@ -5275,8 +5279,8 @@ fn handle_access_token_refresh_needed(
         return Task::none();
     };
     let device_id = state.auth.device_id.trim().to_string();
-    if device_id.is_empty() {
-        tracing::warn!("access_token_refresh_needed skipped: empty device_id");
+    if !auth_prefs::is_canonical_device_id(&device_id) {
+        tracing::warn!("access_token_refresh_needed skipped: device_id is not a canonical UUID v4");
         return Task::none();
     }
     let Some(refresh_token) = auth_prefs::load_refresh_token(user_id) else {
@@ -5329,8 +5333,8 @@ fn handle_login_submit(
         state.auth.error = Some("username/password/device_id are required".to_string());
         return Task::none();
     }
-    if Uuid::parse_str(&device_id).is_err() {
-        state.auth.error = Some("device_id must be a standard UUID".to_string());
+    if !auth_prefs::is_canonical_device_id(&device_id) {
+        state.auth.error = Some("device_id must be a lowercase hyphenated UUID v4".to_string());
         return Task::none();
     }
 
@@ -7870,7 +7874,7 @@ mod tests {
             AppMessage::LoginSucceeded {
                 user_id: 42,
                 token: "token-1".to_string(),
-                device_id: "dev-1".to_string(),
+                device_id: "3f2b8c1e-7a4d-4e5f-9b6a-1c2d3e4f5a6b".to_string(),
             },
             &bridge,
         );

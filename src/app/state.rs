@@ -15,14 +15,19 @@ use crate::presentation::vm::{
 };
 
 fn default_device_id() -> String {
+    // Explicit override (e.g. simulating a second device) must itself be a canonical v4.
     if let Some(value) = std::env::var("PRIVCHAT_DEVICE_ID")
         .ok()
-        .filter(|value| uuid::Uuid::parse_str(value).is_ok())
+        .filter(|value| auth_prefs::is_canonical_device_id(value))
     {
         return value;
     }
 
-    uuid::Uuid::new_v4().to_string()
+    // Unit tests must not write to the user's prefs file.
+    if cfg!(test) {
+        return uuid::Uuid::new_v4().to_string();
+    }
+    auth_prefs::load_or_create_device_id()
 }
 
 #[derive(Debug)]
